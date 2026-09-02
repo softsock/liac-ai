@@ -12,7 +12,13 @@ Provider and sidecar code may own authentication, network, and transport state. 
 
 A small TypeScript/Bun sidecar is intended for model transport where it is needed. It is a transport boundary, not a second conversational runtime.
 
-The intended provider layer for `openai-codex/gpt-5.6-luna` is direct `@oh-my-pi/pi-ai` use. OMP `AgentSession` is not Lilavel's conversational runtime.
+The P0.2 provider layer selects `openai-codex/gpt-5.6-luna` from the pinned
+`@oh-my-pi/pi-catalog` and invokes it directly through `@oh-my-pi/pi-ai`'s
+`streamSimple`. Supported OMP authentication is resolved through its auth
+broker/storage boundary. Each diagnostic request supplies its own caller-owned
+context; the sidecar omits provider session state and uses SSE transport, so
+semantic history remains outside the provider layer. OMP `AgentSession` is not
+Lilavel's conversational runtime, and MCP/tools are not part of this boundary.
 
 ## Interaction invariants
 
