@@ -1,0 +1,371 @@
+import { TextEncoder } from "node:util";
+
+export const PROTOCOL_VERSION = 1 as const;
+
+export const PROTOCOL_LIMITS = {
+  maxFrameBytes: 256 * 1024,
+  maxPromptBytes: 64 * 1024,
+  maxDeltaBytes: 16 * 1024,
+  maxResponseBytes: 256 * 1024,
+  maxIdBytes: 128,
+} as const;
+
+export type ProtocolErrorCode =
+  | "busy"
+  | "not_ready"
+  | "closed"
+  | "not_active"
+  | "startup_error"
+  | "provider_error"
+  | "unsupported_output"
+  | "protocol_error"
+  | "output_limit"
+  | "cancelled";
+
+export type ProtocolCommand = GenerateCommand | CancelCommand | HealthCommand | ShutdownCommand;
+
+export interface GenerateCommand {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "generate";
+  generation_id: string;
+  epoch: number;
+  prompt: string;
+}
+
+export interface CancelCommand {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "cancel";
+  generation_id: string;
+  epoch: number;
+}
+
+export interface HealthCommand {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "health";
+}
+
+export interface ShutdownCommand {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "shutdown";
+}
+
+export type ProtocolEvent =
+  | ReadyEvent
+  | HealthEvent
+  | AcceptedEvent
+  | TextDeltaEvent
+  | CompletedEvent
+  | CancelledEvent
+  | FailedEvent
+  | ShutdownEvent;
+
+export interface ReadyEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "ready";
+  provider: string;
+  model_id: string;
+  api: string;
+}
+
+export interface HealthEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "health";
+  state: "starting" | "ready" | "busy" | "failed" | "closed";
+}
+
+export interface AcceptedEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "accepted";
+  generation_id: string;
+  epoch: number;
+}
+
+export interface TextDeltaEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "text_delta";
+  generation_id: string;
+  epoch: number;
+  delta: string;
+}
+
+export interface CompletedEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "completed";
+  generation_id: string;
+  epoch: number;
+}
+
+export interface CancelledEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "cancelled";
+  generation_id: string;
+  epoch: number;
+}
+
+export type FailedEvent =
+  | {
+      protocol_version: typeof PROTOCOL_VERSION;
+      type: "failed";
+      code: ProtocolErrorCode;
+    }
+  | {
+      protocol_version: typeof PROTOCOL_VERSION;
+      type: "failed";
+      generation_id: string;
+      epoch: number;
+      code: ProtocolErrorCode;
+    };
+
+export interface ShutdownEvent {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "shutdown";
+}
+
+export class ProtocolError extends Error {
+  readonly reason:
+    | "malformed"
+    | "unsupported_version"
+    | "unknown_field"
+    | "invalid_field"
+    | "frame_too_large";
+
+  constructor(
+    reason:
+      | "malformed"
+      | "unsupported_version"
+      | "unknown_field"
+      | "invalid_field"
+      | "frame_too_large",
+  ) {
+    super(reason);
+    this.name = "ProtocolError";
+    this.reason = reason;
+  }
+}
+
+const encoder = new TextEncoder();
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  const actual = Object.keys(value);
+  if (actual.length !== expected.length || actual.some((key) => !expected.includes(key))) {
+    throw new ProtocolError("unknown_field");
+  }
+}
+
+function assertVersion(value: Record<string, unknown>): void {
+  if (value.protocol_version !== PROTOCOL_VERSION) throw new ProtocolError("unsupported_version");
+}
+
+function assertId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || encoder.encode(value).length > PROTOCOL_LIMITS.maxIdBytes) {
+    throw new ProtocolError("invalid_field");
+  }
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) throw new ProtocolError("invalid_field");
+  }
+}
+
+function assertEpoch(value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ProtocolError("invalid_field");
+  }
+}
+
+export function validateGenerationId(value: string): void {
+  assertId(value);
+}
+
+export function validateEpoch(value: number): void {
+  assertEpoch(value);
+}
+
+function assertBoundedString(value: unknown, maxBytes: number): asserts value is string {
+  if (typeof value !== "string" || encoder.encode(value).length > maxBytes) {
+    throw new ProtocolError("invalid_field");
+  }
+}
+
+function assertErrorCode(value: unknown): asserts value is ProtocolErrorCode {
+  if (
+    value !== "busy" &&
+    value !== "not_ready" &&
+    value !== "closed" &&
+    value !== "not_active" &&
+    value !== "startup_error" &&
+    value !== "provider_error" &&
+    value !== "unsupported_output" &&
+    value !== "protocol_error" &&
+    value !== "output_limit" &&
+    value !== "cancelled"
+  ) {
+    throw new ProtocolError("invalid_field");
+  }
+}
+
+function assertFrameSize(line: string): void {
+  if (encoder.encode(line).length > PROTOCOL_LIMITS.maxFrameBytes) {
+    throw new ProtocolError("frame_too_large");
+  }
+}
+
+export function parseCommand(line: string): ProtocolCommand {
+  assertFrameSize(line);
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    throw new ProtocolError("malformed");
+  }
+  if (!isRecord(value)) throw new ProtocolError("malformed");
+  assertVersion(value);
+
+  if (value.type === "generate") {
+    assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "prompt"]);
+    assertId(value.generation_id);
+    assertEpoch(value.epoch);
+    assertBoundedString(value.prompt, PROTOCOL_LIMITS.maxPromptBytes);
+    return value as unknown as GenerateCommand;
+  }
+  if (value.type === "cancel") {
+    assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch"]);
+    assertId(value.generation_id);
+    assertEpoch(value.epoch);
+    return value as unknown as CancelCommand;
+  }
+  if (value.type === "health") {
+    assertExactKeys(value, ["protocol_version", "type"]);
+    return value as unknown as HealthCommand;
+  }
+  if (value.type === "shutdown") {
+    assertExactKeys(value, ["protocol_version", "type"]);
+    return value as unknown as ShutdownCommand;
+  }
+  throw new ProtocolError("invalid_field");
+}
+
+function validateEvent(event: ProtocolEvent): void {
+  const value = event as unknown as Record<string, unknown>;
+  assertVersion(value);
+  const eventType = value.type;
+  if (typeof eventType !== "string") throw new ProtocolError("invalid_field");
+  switch (eventType) {
+    case "ready":
+      assertExactKeys(value, ["protocol_version", "type", "provider", "model_id", "api"]);
+      assertBoundedString(value.provider, PROTOCOL_LIMITS.maxIdBytes);
+      assertBoundedString(value.model_id, PROTOCOL_LIMITS.maxIdBytes);
+      assertBoundedString(value.api, PROTOCOL_LIMITS.maxIdBytes);
+      return;
+    case "health":
+      assertExactKeys(value, ["protocol_version", "type", "state"]);
+      if (
+        value.state !== "starting" &&
+        value.state !== "ready" &&
+        value.state !== "busy" &&
+        value.state !== "failed" &&
+        value.state !== "closed"
+      ) {
+        throw new ProtocolError("invalid_field");
+      }
+      return;
+    case "accepted":
+    case "completed":
+    case "cancelled":
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch"]);
+      assertId(value.generation_id);
+      assertEpoch(value.epoch);
+      return;
+    case "text_delta":
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "delta"]);
+      assertId(value.generation_id);
+      assertEpoch(value.epoch);
+      assertBoundedString(value.delta, PROTOCOL_LIMITS.maxDeltaBytes);
+      if (value.delta.length === 0) throw new ProtocolError("invalid_field");
+      return;
+    case "failed":
+      if ("generation_id" in value || "epoch" in value) {
+        assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "code"]);
+        assertId(value.generation_id);
+        assertEpoch(value.epoch);
+      } else {
+        assertExactKeys(value, ["protocol_version", "type", "code"]);
+      }
+      assertErrorCode(value.code);
+      return;
+    case "shutdown":
+      assertExactKeys(value, ["protocol_version", "type"]);
+      return;
+    default:
+      throw new ProtocolError("invalid_field");
+  }
+}
+
+export function encodeFrame(frame: ProtocolCommand | ProtocolEvent): string {
+  const line = JSON.stringify(frame);
+  assertFrameSize(line);
+  return `${line}\n`;
+}
+
+export function encodeCommand(command: ProtocolCommand): string {
+  parseCommand(JSON.stringify(command));
+  return encodeFrame(command);
+}
+
+export function encodeEvent(event: ProtocolEvent): string {
+  validateEvent(event);
+  return encodeFrame(event);
+}
+
+export async function* readProtocolLines(
+  input: ReadableStream<Uint8Array>,
+): AsyncGenerator<string, void, undefined> {
+  const reader = input.getReader();
+  let buffered = new Uint8Array(0);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value;
+      let lineStart = 0;
+      for (let index = 0; index < chunk.length; index += 1) {
+        if (chunk[index] !== 0x0a) continue;
+        const linePart = chunk.subarray(lineStart, index);
+        const lineBytes = new Uint8Array(buffered.length + linePart.length);
+        lineBytes.set(buffered);
+        lineBytes.set(linePart, buffered.length);
+        buffered = new Uint8Array(0);
+        if (lineBytes.length > PROTOCOL_LIMITS.maxFrameBytes) {
+          throw new ProtocolError("frame_too_large");
+        }
+        lineStart = index + 1;
+        if (lineBytes.at(-1) === 0x0d) yield decodeLine(lineBytes.subarray(0, lineBytes.length - 1));
+        else yield decodeLine(lineBytes);
+      }
+      const remainder = chunk.subarray(lineStart);
+      if (remainder.length > 0) {
+        if (buffered.length + remainder.length > PROTOCOL_LIMITS.maxFrameBytes) {
+          throw new ProtocolError("frame_too_large");
+        }
+        const next = new Uint8Array(buffered.length + remainder.length);
+        next.set(buffered);
+        next.set(remainder, buffered.length);
+        buffered = next;
+      }
+    }
+    if (buffered.length > 0) throw new ProtocolError("malformed");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function decodeLine(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new ProtocolError("malformed");
+  }
+}

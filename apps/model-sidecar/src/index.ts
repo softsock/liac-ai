@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
 import { getBundledModel } from "@oh-my-pi/pi-catalog";
+import { validateEpoch, validateGenerationId } from "./protocol.js";
 
 const PROVIDER = "openai-codex";
 const MODEL_ID = "gpt-5.6-luna";
@@ -51,6 +52,7 @@ export interface SidecarEventMetadata {
 
 interface SidecarEventBase {
   requestId?: string;
+  epoch?: number;
   atMs: number;
   metadata: SidecarEventMetadata;
 }
@@ -68,11 +70,20 @@ export type SidecarEvent =
 export type SidecarErrorCode =
   | "busy"
   | "not_ready"
+  | "not_active"
   | "closed"
+  | "invalid_request"
   | "startup_error"
   | "provider_error"
   | "unsupported_output"
-  | "cancelled";
+  | "cancelled"
+  | "response_limit"
+  | "internal_error";
+
+export interface GenerationIdentity {
+  generationId: string;
+  epoch: number;
+}
 
 export interface GenerationResult {
   requestId: string;
@@ -82,6 +93,8 @@ export interface GenerationResult {
 
 export interface GenerationHandle {
   requestId: string;
+  generationId: string;
+  epoch: number;
   result: Promise<GenerationResult>;
 }
 
@@ -108,12 +121,14 @@ export class SidecarError extends Error {
 
 interface ActiveRequest {
   requestId: string;
+  epoch: number;
   controller: AbortController;
   promise: Promise<GenerationResult>;
 }
 
 interface RequestDiagnostics {
   readonly requestId: string;
+  readonly epoch: number;
   readonly startedAt: number;
   readonly marks: LatencyMarks;
 }
@@ -185,18 +200,26 @@ export class ModelSidecar {
     return this.#startPromise;
   }
 
-  generate(prompt: string): GenerationHandle {
-    const requestId = this.#createRequestId();
-    if (this.#closed || this.#state === "closed") return this.#rejectedHandle(requestId, "closed");
-    if (this.#state !== "ready") return this.#rejectedHandle(requestId, "not_ready");
-    if (this.#active) return this.#rejectedHandle(requestId, "busy");
+  generate(prompt: string, identity?: GenerationIdentity): GenerationHandle {
+    const requestId = identity?.generationId ?? this.#createRequestId();
+    const epoch = identity?.epoch ?? 1;
+    try {
+      validateGenerationId(requestId);
+      validateEpoch(epoch);
+    } catch {
+      return this.#rejectedHandle(requestId, epoch, "invalid_request");
+    }
+    if (this.#closed || this.#state === "closed") return this.#rejectedHandle(requestId, epoch, "closed");
+    if (this.#state !== "ready") return this.#rejectedHandle(requestId, epoch, "not_ready");
+    if (this.#active) return this.#rejectedHandle(requestId, epoch, "busy");
 
     const model = this.#model;
     const auth = this.#auth;
-    if (!model || !auth) return this.#rejectedHandle(requestId, "not_ready");
+    if (!model || !auth) return this.#rejectedHandle(requestId, epoch, "not_ready");
 
     const diagnostics: RequestDiagnostics = {
       requestId,
+      epoch,
       startedAt: this.#now(),
       marks: { requestReceived: 0 },
     };
@@ -205,17 +228,17 @@ export class ModelSidecar {
     this.#emit("request_received", diagnostics, {});
 
     const promise = this.#runRequest(prompt, model, auth, controller, diagnostics);
-    this.#active = { requestId, controller, promise };
+    this.#active = { requestId, epoch, controller, promise };
     const cleanup = () => {
       if (this.#active?.requestId === requestId) this.#active = undefined;
       if (!this.#closed) this.#state = "ready";
     };
     void promise.then(cleanup, cleanup);
-    return { requestId, result: promise };
+    return { requestId, generationId: requestId, epoch, result: promise };
   }
 
-  cancel(requestId: string): boolean {
-    if (this.#active?.requestId !== requestId) return false;
+  cancel(requestId: string, epoch?: number): boolean {
+    if (this.#active?.requestId !== requestId || (epoch !== undefined && this.#active.epoch !== epoch)) return false;
     this.#active.controller.abort();
     return true;
   }
@@ -270,6 +293,8 @@ export class ModelSidecar {
   ): Promise<GenerationResult> {
     let text = "";
     let iterator: AsyncIterator<AssistantMessageEvent> | undefined;
+    let result: GenerationResult | undefined;
+    let failure: SidecarError | undefined;
     try {
       const message: Message = { role: "user", content: prompt, timestamp: Date.now() };
       const context: Context = { messages: [message] };
@@ -300,39 +325,29 @@ export class ModelSidecar {
         }
         if (received.type === "text_delta") {
           if (received.delta.length > 0) this.#mark(diagnostics, "firstNonEmptyDelta");
+          if (new TextEncoder().encode(text + received.delta).byteLength > 4 * 1024 * 1024) {
+            throw new SidecarError("response_limit");
+          }
           text += received.delta;
           this.#emit("text_delta", diagnostics, { delta: received.delta });
         } else if (received.type === "error") {
           if (received.reason === "aborted" || controller.signal.aborted) throw new SidecarError("cancelled");
-          this.#emit("error", diagnostics, { code: "provider_error" });
           throw new SidecarError("provider_error");
         } else if (received.type === "done" && received.reason === "toolUse") {
-          this.#emit("error", diagnostics, { code: "unsupported_output" });
           throw new SidecarError("unsupported_output");
         } else if (received.type === "toolcall_start" || received.type === "toolcall_delta" || received.type === "toolcall_end") {
-          this.#emit("error", diagnostics, { code: "unsupported_output" });
           throw new SidecarError("unsupported_output");
         }
         if (received.type === "done") break;
       }
       if (controller.signal.aborted) throw new SidecarError("cancelled");
-      this.#mark(diagnostics, "completion");
-      this.#emit("completed", diagnostics, { textLength: text.length });
-      return { requestId: diagnostics.requestId, status: "completed", text };
+      result = { requestId: diagnostics.requestId, status: "completed", text };
     } catch (error) {
       if (controller.signal.aborted || isAbortError(error)) {
-        this.#mark(diagnostics, "cancellation");
-        this.#emit("cancelled", diagnostics, {});
-        return { requestId: diagnostics.requestId, status: "cancelled", text };
+        result = { requestId: diagnostics.requestId, status: "cancelled", text };
       }
-      if (error instanceof SidecarError) {
-        if (error.code !== "provider_error" && error.code !== "unsupported_output") {
-          this.#emit("error", diagnostics, { code: "provider_error" });
-        }
-        throw error;
-      }
-      this.#emit("error", diagnostics, { code: "provider_error" });
-      throw new SidecarError("provider_error");
+      else if (error instanceof SidecarError) failure = error;
+      else failure = new SidecarError("provider_error");
     } finally {
       if (iterator) {
         try {
@@ -343,6 +358,19 @@ export class ModelSidecar {
         }
       }
     }
+    if (result?.status === "cancelled") {
+      this.#mark(diagnostics, "cancellation");
+      this.#emit("cancelled", diagnostics, {});
+      return result;
+    }
+    if (result) {
+      this.#mark(diagnostics, "completion");
+      this.#emit("completed", diagnostics, { textLength: result.text.length });
+      return result;
+    }
+    const terminalFailure = failure ?? new SidecarError("provider_error");
+    this.#emit("error", diagnostics, { code: terminalFailure.code });
+    throw terminalFailure;
   }
 
   async #nextOrCancelled<T>(
@@ -365,14 +393,15 @@ export class ModelSidecar {
     }
   }
 
-  #rejectedHandle(requestId: string, code: SidecarErrorCode): GenerationHandle {
+  #rejectedHandle(requestId: string, epoch: number, code: SidecarErrorCode): GenerationHandle {
     const diagnostics: RequestDiagnostics = {
       requestId,
+      epoch,
       startedAt: this.#now(),
       marks: { requestReceived: 0 },
     };
     this.#emit("error", diagnostics, { code });
-    return { requestId, result: Promise.reject(new SidecarError(code)) };
+    return { requestId, generationId: requestId, epoch, result: Promise.reject(new SidecarError(code)) };
   }
 
   #mark(diagnostics: RequestDiagnostics, name: keyof LatencyMarks): void {
@@ -389,6 +418,7 @@ export class ModelSidecar {
     const event = {
       type,
       ...(diagnostics ? { requestId: diagnostics.requestId } : {}),
+      ...(diagnostics ? { epoch: diagnostics.epoch } : {}),
       atMs: this.#now(),
       metadata: {
         marks: diagnostics ? { ...diagnostics.marks } : {},

@@ -8,7 +8,8 @@
     "check": "tsc --noEmit",
     "test": "bun test",
     "smoke": "bun run src/cli.ts",
-    "probe": "bun run src/cli.ts --probe"
+    "probe": "bun run src/cli.ts --probe",
+    "protocol": "bun run src/protocol-cli.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-ai": "18.1.2",
