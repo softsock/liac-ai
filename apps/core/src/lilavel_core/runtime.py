@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -13,8 +14,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
-from typing import BinaryIO, Final, Literal
+from typing import BinaryIO, Final, Literal, cast
 
+from .process_containment import (
+    ProcessContainment,
+    ProcessContainmentError,
+    attach_process_containment,
+    process_creation_flags,
+)
 from .sidecar_protocol import (
     MAX_FRAME_BYTES,
     MAX_RESPONSE_BYTES,
@@ -27,6 +34,7 @@ from .sidecar_protocol import (
     HealthEvent,
     ModelRequest,
     ProtocolError,
+    ProtocolErrorCode,
     ReadyEvent,
     RuntimeState,
     ShutdownCommand,
@@ -40,6 +48,7 @@ from .sidecar_protocol import GenerationFailed as GenerationFailedEvent
 DEFAULT_EVENT_QUEUE_SIZE: Final = 128
 DEFAULT_STARTUP_TIMEOUT: Final = 30.0
 DEFAULT_SHUTDOWN_TIMEOUT: Final = 5.0
+DEFAULT_CANCELLATION_TIMEOUT: Final = 7.0
 DEFAULT_WRITE_TIMEOUT: Final = 5.0
 _READ_CHUNK_SIZE: Final = 4096
 
@@ -56,6 +65,10 @@ class RuntimeBusy(ModelRuntimeError):
     """A generation is already active."""
 
 
+class RuntimeShuttingDown(ModelRuntimeError):
+    """The runtime has closed admission while shutting down."""
+
+
 class RuntimeStartTimeout(ModelRuntimeError):
     """The sidecar did not become ready before the bounded startup deadline."""
 
@@ -64,12 +77,20 @@ class ShutdownTimeout(ModelRuntimeError):
     """The sidecar did not exit before the bounded shutdown deadline."""
 
 
+class CancellationTimeout(ModelRuntimeError):
+    """The sidecar did not settle cancellation before the bounded deadline."""
+
+
 class SidecarCrashed(ModelRuntimeError):
     """The sidecar exited or its pipe became unusable before completion."""
 
 
 class ProtocolViolation(ModelRuntimeError):
     """The sidecar emitted malformed or invalidly correlated protocol data."""
+
+
+class EventQueueOverflow(ProtocolViolation):
+    """The caller did not consume a bounded generation event queue quickly enough."""
 
 
 class GenerationFailed(ModelRuntimeError):
@@ -95,7 +116,15 @@ class GenerationResult:
 
 
 class GenerationHandle:
-    """A streamed generation owned by one ModelRuntime instance."""
+    """A streamed generation owned by one ModelRuntime instance.
+
+    ``events()`` is the sole streaming consumer and must be consumed while a
+    generation is running.  ``wait()`` waits only for terminal settlement; it
+    does not drain the bounded event queue.  If the queue fills, the runtime
+    fails closed and retains the terminal failure for delivery after queued
+    events drain.  Text includes only deltas accepted into the queue, so a
+    cancelled generation exposes the partial text received before cancellation.
+    """
 
     def __init__(self, generation_id: str, epoch: int, queue_size: int) -> None:
         self.generation_id = generation_id
@@ -111,23 +140,45 @@ class GenerationHandle:
             GenerationCompleted | GenerationCancelled | GenerationFailedEvent | None
         ) = None
         self._terminal_delivered = False
+        self._settled = False
+        self._consumer_active = False
 
     def events(self) -> Iterator[GenerationEvent]:
-        """Yield accepted, delta, and terminal events in wire order."""
-        while True:
-            try:
-                event = self._events.get(timeout=0.1)
-            except Empty:
-                if self._terminal.is_set():
-                    with self._lock:
-                        if self._terminal_delivered or self._terminal_event is None:
-                            return
-                        self._terminal_delivered = True
-                        terminal_event = self._terminal_event
-                    yield terminal_event
-                    return
-                continue
-            yield event
+        """Yield accepted, delta, and terminal events in wire order.
+
+        Only one iterator may consume a handle.  A terminal event is retained
+        out of band so it is still observable when the bounded event queue was
+        full at the point of failure.
+        """
+        with self._lock:
+            if self._consumer_active:
+                raise ModelRuntimeError("generation events already have a consumer")
+            self._consumer_active = True
+        try:
+            while True:
+                try:
+                    event = self._events.get(timeout=0.1)
+                except Empty:
+                    if self._terminal.is_set():
+                        with self._lock:
+                            # Producers serialize queue insertion and settlement
+                            # under this lock.  Recheck the queue while holding
+                            # it so a final delta cannot appear after fallback
+                            # terminal delivery.
+                            if self._terminal_delivered:
+                                return
+                            if not self._events.empty() or self._terminal_event is None:
+                                continue
+
+                            self._terminal_delivered = True
+                            terminal_event = self._terminal_event
+                        yield terminal_event
+                        return
+                    continue
+                yield event
+        finally:
+            with self._lock:
+                self._consumer_active = False
 
     def __iter__(self) -> Iterator[GenerationEvent]:
         return self.events()
@@ -148,35 +199,57 @@ class GenerationHandle:
         with self._lock:
             return "".join(self._text_parts)
 
-    def offer(self, event: GenerationEvent) -> Literal["accepted", "queue_full", "output_limit"]:
-        if isinstance(event, TextDelta):
-            delta_bytes = len(event.delta.encode("utf-8"))
-            with self._lock:
+    @property
+    def settled(self) -> bool:
+        with self._lock:
+            return self._settled
+
+    def offer(
+        self, event: GenerationEvent
+    ) -> Literal["accepted", "queue_full", "output_limit", "settled"]:
+        """Offer one non-terminal wire event without exceeding local bounds."""
+        with self._lock:
+            if self._settled:
+                return "settled"
+            delta_bytes = 0
+            delta_text: str | None = None
+            if isinstance(event, TextDelta):
+                delta_bytes = len(event.delta.encode("utf-8"))
+                delta_text = event.delta
                 if self._text_bytes + delta_bytes > MAX_RESPONSE_BYTES:
                     return "output_limit"
-                self._text_parts.append(event.delta)
+            try:
+                self._events.put_nowait(event)
+            except Full:
+                return "queue_full"
+            if delta_text is not None:
+                self._text_parts.append(delta_text)
                 self._text_bytes += delta_bytes
-        try:
-            self._events.put_nowait(event)
-        except Full:
-            return "queue_full"
-        return "accepted"
+            return "accepted"
 
-    def complete(self, event: GenerationCompleted | GenerationCancelled) -> None:
+    def complete(self, event: GenerationCompleted | GenerationCancelled) -> bool:
         with self._lock:
+            if self._settled:
+                return False
             self._result = GenerationResult(
                 generation_id=self.generation_id,
                 status="completed" if isinstance(event, GenerationCompleted) else "cancelled",
                 text="".join(self._text_parts),
             )
             self._terminal_event = event
+            self._settled = True
             self._terminal.set()
+            return True
 
-    def fail(self, event: GenerationFailedEvent, error: ModelRuntimeError) -> None:
+    def fail(self, event: GenerationFailedEvent, error: ModelRuntimeError) -> bool:
         with self._lock:
+            if self._settled:
+                return False
             self._failure = error
             self._terminal_event = event
+            self._settled = True
             self._terminal.set()
+            return True
 
 
 @dataclass(slots=True)
@@ -185,6 +258,8 @@ class _PendingGeneration:
     generation_id: str
     epoch: int
     phase: Literal["created", "accepted", "streaming", "cancelling", "terminal"] = "created"
+    accepted_seen: bool = False
+    cancel_timer: threading.Timer | None = None
 
 
 class ModelRuntime:
@@ -197,24 +272,39 @@ class ModelRuntime:
         sidecar_dir: Path | None = None,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
         shutdown_timeout: float = DEFAULT_SHUTDOWN_TIMEOUT,
+        cancellation_timeout: float = DEFAULT_CANCELLATION_TIMEOUT,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
         event_queue_size: int = DEFAULT_EVENT_QUEUE_SIZE,
     ) -> None:
-        if startup_timeout <= 0 or shutdown_timeout <= 0 or write_timeout <= 0:
+        if not all(
+            math.isfinite(value) and value > 0
+            for value in (
+                startup_timeout,
+                shutdown_timeout,
+                cancellation_timeout,
+                write_timeout,
+            )
+        ):
             raise ValueError("runtime timeouts must be positive")
-        if event_queue_size <= 0:
-            raise ValueError("event_queue_size must be positive")
+        if type(event_queue_size) is not int or event_queue_size <= 0:
+            raise ValueError("event_queue_size must be a positive integer")
         self._command = tuple(command) if command is not None else _default_command()
         self._sidecar_dir = sidecar_dir or _default_sidecar_dir()
         self._startup_timeout = startup_timeout
         self._shutdown_timeout = shutdown_timeout
+        self._cancellation_timeout = cancellation_timeout
         self._write_timeout = write_timeout
         self._event_queue_size = event_queue_size
         self._lock = threading.RLock()
+        # Serializes admission and the corresponding wire command.  Holding
+        # this lock for the bounded write prevents shutdown from closing
+        # admission before an already-reserved generation reaches stdin.
+        self._command_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._write_broken = False
         self._state: RuntimeState = "new"
         self._process: subprocess.Popen[bytes] | None = None
+        self._containment: ProcessContainment | None = None
         self._reader_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -223,6 +313,9 @@ class ModelRuntime:
         self._next_epoch = 0
         self._failure: ModelRuntimeError | None = None
         self._shutdown_requested = False
+        self._shutdown_event_seen = False
+        self._process_exit_code: int | None = None
+        self._last_cancel: tuple[str, int] | None = None
 
     @property
     def ready(self) -> bool:
@@ -241,6 +334,8 @@ class ModelRuntime:
         with self._lock:
             if self._state in {"ready", "busy"}:
                 return
+            if self._state == "shutting_down":
+                raise RuntimeShuttingDown("runtime is shutting down")
             if self._state == "closed":
                 raise ModelRuntimeError("runtime is closed")
             if self._state == "failed":
@@ -251,18 +346,24 @@ class ModelRuntime:
                 self._state = "starting"
                 self._failure = None
                 self._shutdown_requested = False
+                self._shutdown_event_seen = False
+                self._process_exit_code = None
+                self._last_cancel = None
                 self._write_broken = False
                 self._ready.clear()
                 self._shutdown_complete.clear()
                 try:
-                    process = subprocess.Popen(
-                        self._command,
-                        cwd=str(self._sidecar_dir),
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        bufsize=0,
-                    )
+                    creation_flags = process_creation_flags()
+                    popen_options: dict[str, object] = {
+                        "cwd": str(self._sidecar_dir),
+                        "stdin": subprocess.PIPE,
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "bufsize": 0,
+                    }
+                    if creation_flags:
+                        popen_options["creationflags"] = creation_flags
+                    process = subprocess.Popen(self._command, **popen_options)  # type: ignore[arg-type]
                 except OSError as error:
                     failure = SidecarCrashed(f"could not start sidecar: {error.__class__.__name__}")
                     self._state = "failed"
@@ -276,7 +377,21 @@ class ModelRuntime:
                     self._failure = failure
                     self._ready.set()
                     raise failure
+                try:
+                    containment = attach_process_containment(
+                        process,
+                        suspended=bool(creation_flags),
+                    )
+                except (OSError, ProcessContainmentError) as error:
+                    _terminate_process(process)
+                    _close_pipes(process)
+                    failure = SidecarCrashed("could not establish sidecar process containment")
+                    self._state = "failed"
+                    self._failure = failure
+                    self._ready.set()
+                    raise failure from error
                 self._process = process
+                self._containment = containment
                 self._reader_thread = threading.Thread(
                     target=self._read_stdout,
                     args=(process.stdout,),
@@ -298,11 +413,17 @@ class ModelRuntime:
                 failure = self._failure
             if failure is not None:
                 raise failure
+            if self.health().state == "shutting_down":
+                raise RuntimeShuttingDown("runtime shutdown began during startup")
             timeout = RuntimeStartTimeout("sidecar did not become ready")
             self._fail_runtime(timeout)
             raise timeout
 
     def generate(self, request: ModelRequest) -> GenerationHandle:
+        with self._command_lock:
+            return self._generate_impl(request)
+
+    def _generate_impl(self, request: ModelRequest) -> GenerationHandle:
         with self._lock:
             self._ensure_ready()
             if self._active is not None:
@@ -310,86 +431,250 @@ class ModelRuntime:
             self._next_epoch += 1
             generation_id = str(uuid.uuid4())
             handle = GenerationHandle(generation_id, self._next_epoch, self._event_queue_size)
-            self._active = _PendingGeneration(handle, generation_id, self._next_epoch)
-            self._state = "busy"
-            command = GenerateCommand(generation_id, self._next_epoch, request.prompt)
+            pending = _PendingGeneration(handle, generation_id, self._next_epoch)
             try:
-                self._write_command(command)
-            except OSError as error:
-                failure = SidecarCrashed("sidecar input pipe failed")
-                self._fail_pending_locked(failure)
-                self._fail_runtime_locked(failure)
-                raise failure from error
-            return handle
+                command = GenerateCommand(generation_id, self._next_epoch, request.prompt)
+            except (AttributeError, TypeError) as error:
+                raise ProtocolViolation("invalid generation request") from error
+            self._active = pending
+            self._state = "busy"
+            self._last_cancel = None
+        try:
+            self._write_command(command)
+        except ProtocolError as error:
+            failure = ProtocolViolation(f"could not encode generation request: {error.reason}")
+            with self._lock:
+                if self._active is pending:
+                    self._fail_pending_locked(failure)
+            raise failure from error
+        except OSError as error:
+            failure = SidecarCrashed("sidecar input pipe failed")
+            with self._lock:
+                if self._active is pending:
+                    self._fail_pending_locked(failure)
+                process = self._fail_runtime_locked(failure)
+            if process is not None:
+                _terminate_process(process)
+            raise failure from error
+        return handle
 
     def cancel(self, generation_id: str) -> bool:
+        with self._command_lock:
+            return self._cancel_impl(generation_id)
+
+    def _cancel_impl(self, generation_id: str) -> bool:
         with self._lock:
             pending = self._active
-            if (
-                pending is None
-                or pending.generation_id != generation_id
-                or pending.phase == "terminal"
-            ):
+            if pending is None:
+                # Cancellation is idempotent for the most recent request.  A
+                # sidecar can deliver ``cancelled`` synchronously while the
+                # caller is still deciding whether to retry the call.
+                return self._last_cancel is not None and self._last_cancel[0] == generation_id
+            if pending.generation_id != generation_id or pending.phase == "terminal":
                 return False
             if pending.phase == "cancelling":
+                self._last_cancel = (pending.generation_id, pending.epoch)
                 return True
             pending.phase = "cancelling"
+            self._last_cancel = (pending.generation_id, pending.epoch)
+            self._arm_cancellation_watchdog_locked(pending)
             command = CancelCommand(pending.generation_id, pending.epoch)
-            try:
-                self._write_command(command)
-            except OSError as error:
-                failure = SidecarCrashed("sidecar input pipe failed during cancellation")
-                self._fail_pending_locked(failure)
-                self._fail_runtime_locked(failure)
-                raise failure from error
-            return True
+        try:
+            self._write_command(command)
+        except OSError as error:
+            failure = SidecarCrashed("sidecar input pipe failed during cancellation")
+            with self._lock:
+                if self._active is pending:
+                    self._fail_pending_locked(failure)
+                process = self._fail_runtime_locked(failure)
+            if process is not None:
+                _terminate_process(process)
+            raise failure from error
+        return True
 
     def shutdown(self) -> None:
+        with self._command_lock:
+            self._shutdown_impl()
+
+    def _shutdown_impl(self) -> None:
+        cancel_command: CancelCommand | None = None
+        shutdown_command = ShutdownCommand()
         with self._lock:
             if self._state == "closed":
                 return
             if self._state == "new":
                 self._state = "closed"
                 return
-            process = self._process
-            self._shutdown_requested = True
-            pending = self._active
-            cancel_command: CancelCommand | None = None
-            if pending is not None and pending.phase != "terminal":
-                pending.phase = "cancelling"
-                cancel_command = CancelCommand(pending.generation_id, pending.epoch)
-        try:
-            if cancel_command is not None:
-                self._write_command(cancel_command)
-            self._write_command(ShutdownCommand())
-        except OSError:
-            self._fail_runtime(SidecarCrashed("sidecar input pipe failed during shutdown"))
+            if self._state == "failed":
+                failed_at_start = True
+                process = self._process
+                containment = self._containment
+                self._shutdown_requested = True
+                pending = self._active
+                if pending is not None:
+                    self._fail_pending_locked(self._failure or SidecarCrashed("runtime failed"))
+                self._shutdown_complete.set()
+            else:
+                failed_at_start = False
+                # Admission closes while holding the same lock used by
+                # generate().  No new request can slip between this point and
+                # teardown, even if the caller is concurrently generating.
+                self._shutdown_requested = True
+                self._state = "shutting_down"
+                # Wake a concurrent start() waiter so it observes the typed
+                # admission-closed state instead of waiting for startup timeout.
+                self._ready.set()
+                self._shutdown_event_seen = False
+                self._process_exit_code = None
+                process = self._process
+                containment = self._containment
+                pending = self._active
+                if pending is not None and pending.phase != "terminal":
+                    pending.phase = "cancelling"
+                    self._last_cancel = (pending.generation_id, pending.epoch)
+                    self._arm_cancellation_watchdog_locked(pending)
+                    cancel_command = CancelCommand(pending.generation_id, pending.epoch)
+
+        if failed_at_start:
+            containment_ok = True
+            if process is not None and process.poll() is None:
+                containment_ok = _terminate_owned_process(process, containment)
+            elif containment is not None:
+                containment_ok = _close_ownership(containment)
+            if process is not None:
+                _close_pipes(process)
+            with self._lock:
+                self._process = None
+                if containment_ok:
+                    self._containment = None
+            return
 
         deadline = time.monotonic() + self._shutdown_timeout
-        completed = self._shutdown_complete.wait(max(0.0, deadline - time.monotonic()))
-        timed_out = not completed
+        shutdown_failure: ModelRuntimeError | None = None
+        commands: list[CancelCommand | ShutdownCommand] = []
+        if cancel_command is not None:
+            commands.append(cancel_command)
+        commands.append(shutdown_command)
+        for command in commands:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                shutdown_failure = ShutdownTimeout("sidecar did not shut down before the deadline")
+                break
+            try:
+                self._write_command(command, timeout=min(self._write_timeout, remaining))
+            except OSError:
+                shutdown_failure = SidecarCrashed("sidecar input pipe failed during shutdown")
+                with self._lock:
+                    process_to_terminate = self._fail_runtime_locked(shutdown_failure)
+                if process_to_terminate is not None:
+                    _terminate_process(process_to_terminate)
+                break
+
+        timed_out = False
+        containment_ok = True
         if process is not None:
             remaining = max(0.0, deadline - time.monotonic())
+            if shutdown_failure is None:
+                completed = self._shutdown_complete.wait(remaining)
+                timed_out = not completed
             try:
-                process.wait(timeout=remaining)
+                if timed_out:
+                    raise subprocess.TimeoutExpired(self._command[0], 0)
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 timed_out = True
-                _terminate_process(process)
+                # Settle the timed-out operation before containment changes
+                # the child's exit code. Its forced exit is a consequence of
+                # this deadline, not a new spontaneous SidecarCrashed result.
+                with self._lock:
+                    if self._failure is None:
+                        timeout_failure = shutdown_failure or ShutdownTimeout(
+                            "sidecar did not shut down before the deadline"
+                        )
+                        self._state = "failed"
+                        self._failure = timeout_failure
+                        self._fail_pending_locked(timeout_failure)
+                        self._ready.set()
+                        self._shutdown_complete.set()
+                containment_ok = _terminate_owned_process(process, containment)
+            exit_code = process.poll()
+            if not timed_out:
+                containment_ok = _close_ownership(containment)
+            elif containment is not None:
+                containment_ok = _close_ownership(containment) and containment_ok
             _close_pipes(process)
+        else:
+            exit_code = None
+            containment_ok = _close_ownership(containment)
+
         with self._lock:
-            self._state = "closed"
+            observed_failure = self._failure
+            shutdown_ack = self._shutdown_event_seen
+            pending_unsettled = self._active is not None
+            if self._active is not None:
+                pending_failure = shutdown_failure or observed_failure
+                if pending_failure is None and timed_out:
+                    pending_failure = ShutdownTimeout("generation did not settle before shutdown")
+                if pending_failure is None:
+                    pending_failure = SidecarCrashed(
+                        "generation did not emit a terminal event before shutdown"
+                    )
+                self._fail_pending_locked(pending_failure)
+
+            if shutdown_failure is None:
+                if timed_out:
+                    shutdown_failure = ShutdownTimeout(
+                        "sidecar did not shut down before the deadline"
+                    )
+                elif observed_failure is not None:
+                    shutdown_failure = observed_failure
+                elif process is None:
+                    shutdown_failure = SidecarCrashed("sidecar process was unavailable")
+                elif exit_code != 0:
+                    shutdown_failure = SidecarCrashed("sidecar exited abnormally during shutdown")
+                elif not shutdown_ack:
+                    shutdown_failure = SidecarCrashed(
+                        "sidecar exited without shutdown acknowledgement"
+                    )
+                elif pending_unsettled:
+                    shutdown_failure = SidecarCrashed(
+                        "generation did not emit a terminal event before shutdown"
+                    )
+                elif not containment_ok:
+                    shutdown_failure = SidecarCrashed(
+                        "sidecar process containment could not be confirmed"
+                    )
+
+            if shutdown_failure is None:
+                self._state = "closed"
+                self._failure = None
+            else:
+                self._state = "failed"
+                self._failure = shutdown_failure
             self._process = None
-            self._active = None
-        if timed_out:
-            raise ShutdownTimeout("sidecar did not shut down before the deadline")
+            if containment_ok:
+                self._containment = None
+            self._shutdown_complete.set()
+
+        if shutdown_failure is not None:
+            if isinstance(shutdown_failure, ShutdownTimeout):
+                raise shutdown_failure
+            raise shutdown_failure
 
     def _ensure_ready(self) -> None:
+        if self._shutdown_requested or self._state == "shutting_down":
+            raise RuntimeShuttingDown("runtime is shutting down")
         if self._state != "ready":
             if self._state == "busy":
                 raise RuntimeBusy("a generation is already active")
             raise RuntimeNotReady(f"runtime is {self._state}")
 
-    def _write_command(self, command: GenerateCommand | CancelCommand | ShutdownCommand) -> None:
+    def _write_command(
+        self,
+        command: GenerateCommand | CancelCommand | ShutdownCommand,
+        *,
+        timeout: float | None = None,
+    ) -> None:
         payload = encode_command(command)
         with self._lock:
             process = self._process
@@ -413,11 +698,14 @@ class ModelRuntime:
                     completed.set()
 
             threading.Thread(target=write, name="lilavel-sidecar-writer", daemon=True).start()
-            if not completed.wait(self._write_timeout):
-                self._write_broken = True
+            wait_timeout = self._write_timeout if timeout is None else timeout
+            if not completed.wait(wait_timeout):
+                with self._lock:
+                    self._write_broken = True
                 raise OSError("sidecar input pipe write timed out")
             if failure:
-                self._write_broken = True
+                with self._lock:
+                    self._write_broken = True
                 raise OSError("sidecar input pipe failed") from failure[0]
 
     def _read_stdout(self, stream: BinaryIO) -> None:
@@ -431,8 +719,13 @@ class ModelRuntime:
         finally:
             with self._lock:
                 expected_shutdown = self._shutdown_requested
-            if expected_shutdown:
+                process = self._process
+                self._process_exit_code = process.poll() if process is not None else None
+                exit_code = self._process_exit_code
                 self._shutdown_complete.set()
+            if expected_shutdown:
+                if exit_code not in (None, 0):
+                    self._fail_runtime(SidecarCrashed("sidecar exited abnormally during shutdown"))
             else:
                 self._fail_runtime(SidecarCrashed("sidecar exited before shutdown"))
 
@@ -443,6 +736,12 @@ class ModelRuntime:
     def _dispatch(self, event: GenerationEvent) -> None:
         if isinstance(event, ReadyEvent):
             with self._lock:
+                if self._state == "shutting_down":
+                    # Startup may complete after shutdown closes admission.
+                    # The handshake is still valid, but it must not reopen
+                    # admission or strand the start() waiter.
+                    self._ready.set()
+                    return
                 if self._state != "starting":
                     self._fail_runtime_locked(ProtocolViolation("unexpected ready event"))
                     return
@@ -452,7 +751,12 @@ class ModelRuntime:
         if isinstance(event, HealthEvent):
             return
         if isinstance(event, ShutdownEvent):
-            self._shutdown_complete.set()
+            with self._lock:
+                if not self._shutdown_requested:
+                    self._fail_runtime_locked(ProtocolViolation("unexpected shutdown event"))
+                    return
+                self._shutdown_event_seen = True
+                self._shutdown_complete.set()
             return
         if isinstance(event, GenerationFailedEvent) and event.generation_id is None:
             with self._lock:
@@ -490,10 +794,19 @@ class ModelRuntime:
                 return
 
             if isinstance(event, GenerationAccepted):
-                if pending.phase != "created" or pending.handle.offer(event) != "accepted":
+                # Cancellation is a caller intent, not proof that the request
+                # was never admitted by the sidecar.  ``accepted`` may race
+                # with the cancel command exactly once.
+                if (
+                    pending.phase not in {"created", "cancelling"}
+                    or pending.accepted_seen
+                    or pending.handle.offer(event) != "accepted"
+                ):
                     self._fail_runtime_locked(ProtocolViolation("invalid accepted transition"))
                 else:
-                    pending.phase = "accepted"
+                    pending.accepted_seen = True
+                    if pending.phase == "created":
+                        pending.phase = "accepted"
             elif isinstance(event, TextDelta):
                 if pending.phase in {"cancelling", "terminal"}:
                     return
@@ -503,21 +816,21 @@ class ModelRuntime:
                     offer_result = pending.handle.offer(event)
                     if offer_result == "queue_full":
                         self._fail_runtime_locked(
-                            ProtocolViolation("generation event buffer is full")
+                            EventQueueOverflow("generation event buffer is full")
                         )
                     elif offer_result == "output_limit":
-                        pending.phase = "terminal"
+                        pending.phase = "cancelling"
                         pending.handle.fail(
                             GenerationFailedEvent(
                                 pending.generation_id, pending.epoch, "output_limit"
                             ),
                             GenerationFailed("output_limit"),
                         )
-                        self._active = None
-                        self._state = "ready"
+                        self._last_cancel = (pending.generation_id, pending.epoch)
+                        self._arm_cancellation_watchdog_locked(pending)
                         cancel_after_limit = True
                         cancel_identity = (pending.generation_id, pending.epoch)
-                    else:
+                    elif offer_result == "accepted":
                         pending.phase = "streaming"
             elif isinstance(event, GenerationCompleted):
                 if pending.phase not in {"accepted", "streaming", "cancelling"}:
@@ -534,9 +847,19 @@ class ModelRuntime:
                     pending.handle.complete(event)
                     self._finish_pending_locked(pending)
             else:
-                pending.phase = "terminal"
-                pending.handle.fail(event, GenerationFailed(event.code))
-                self._finish_pending_locked(pending)
+                if event.code in {
+                    "cleanup_timeout",
+                    "cleanup_error",
+                    "shutdown_timeout",
+                    "cancellation_timeout",
+                }:
+                    # These codes mean provider cleanup was not confirmed.  A
+                    # fresh generation cannot be admitted on this process.
+                    self._fail_runtime_locked(GenerationFailed(event.code))
+                else:
+                    pending.phase = "terminal"
+                    pending.handle.fail(event, GenerationFailed(event.code))
+                    self._finish_pending_locked(pending)
         if cancel_after_limit:
             try:
                 if cancel_identity is None:
@@ -548,6 +871,9 @@ class ModelRuntime:
     def _finish_pending_locked(self, pending: _PendingGeneration) -> None:
         if self._active is pending:
             self._active = None
+            if pending.cancel_timer is not None:
+                pending.cancel_timer.cancel()
+                pending.cancel_timer = None
             if self._state == "busy":
                 self._state = "ready"
 
@@ -556,12 +882,42 @@ class ModelRuntime:
         if pending is None:
             return
         pending.phase = "terminal"
-        event = GenerationFailedEvent(pending.generation_id, pending.epoch, "protocol_error")
+        event = GenerationFailedEvent(
+            pending.generation_id,
+            pending.epoch,
+            _failure_code(failure),
+        )
         pending.handle.fail(event, failure)
         self._finish_pending_locked(pending)
 
+    def _arm_cancellation_watchdog_locked(self, pending: _PendingGeneration) -> None:
+        if pending.cancel_timer is not None:
+            return
+        timer = threading.Timer(
+            self._cancellation_timeout,
+            self._cancellation_expired,
+            args=(pending.generation_id, pending.epoch),
+        )
+        timer.daemon = True
+        pending.cancel_timer = timer
+        timer.start()
+
+    def _cancellation_expired(self, generation_id: str, epoch: int) -> None:
+        with self._lock:
+            pending = self._active
+            if (
+                pending is None
+                or pending.generation_id != generation_id
+                or pending.epoch != epoch
+                or pending.phase != "cancelling"
+            ):
+                return
+            failure = CancellationTimeout("sidecar did not settle cancellation before the deadline")
+            process = self._fail_runtime_locked(failure)
+        if process is not None:
+            _terminate_process(process)
+
     def _fail_runtime(self, failure: ModelRuntimeError) -> None:
-        process: subprocess.Popen[bytes] | None
         with self._lock:
             process = self._fail_runtime_locked(failure)
         if process is not None:
@@ -578,13 +934,49 @@ class ModelRuntime:
         if pending is not None:
             self._fail_pending_locked(failure)
         process = self._process
-        if process is not None and process.poll() is None:
-            threading.Thread(target=_terminate_process, args=(process,), daemon=True).start()
+        containment = self._containment
+        if process is not None and (process.poll() is None or containment is not None):
+            # The reader thread may be the caller and cannot synchronously
+            # terminate a process while other teardown code is waiting on it.
+            threading.Thread(
+                target=_terminate_owned_process,
+                args=(process, containment),
+                daemon=True,
+            ).start()
         return None
 
 
 def _default_sidecar_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "model-sidecar"
+
+
+def _failure_code(failure: ModelRuntimeError) -> ProtocolErrorCode:
+    if isinstance(failure, CancellationTimeout):
+        return "cancellation_timeout"
+    if isinstance(failure, ShutdownTimeout):
+        return "shutdown_timeout"
+    if isinstance(failure, GenerationFailed):
+        if failure.code in {
+            "busy",
+            "not_ready",
+            "closed",
+            "not_active",
+            "startup_error",
+            "provider_error",
+            "unsupported_output",
+            "protocol_error",
+            "output_limit",
+            "cancelled",
+            "cleanup_timeout",
+            "cleanup_error",
+            "shutdown_timeout",
+            "cancellation_timeout",
+        }:
+            return cast(ProtocolErrorCode, failure.code)
+        return "provider_error"
+    if isinstance(failure, ProtocolViolation):
+        return "protocol_error"
+    return "provider_error"
 
 
 def _default_command() -> tuple[str, ...]:
@@ -621,6 +1013,29 @@ def _iter_frames(stream: BinaryIO) -> Iterator[bytes]:
             buffered.extend(remainder)
     if buffered:
         raise ProtocolError("malformed")
+
+
+def _terminate_owned_process(
+    process: subprocess.Popen[bytes], containment: ProcessContainment | None
+) -> bool:
+    """Terminate the sidecar and its owned descendants when available."""
+
+    if containment is not None:
+        try:
+            return containment.terminate(timeout=1.0)
+        except (OSError, ProcessContainmentError):
+            return False
+    _terminate_process(process)
+    return process.poll() is not None
+
+
+def _close_ownership(containment: ProcessContainment | None) -> bool:
+    if containment is None:
+        return True
+    try:
+        return containment.close()
+    except (OSError, ProcessContainmentError):
+        return False
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:

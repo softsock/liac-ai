@@ -25,9 +25,21 @@ type ProtocolErrorCode = Literal[
     "protocol_error",
     "output_limit",
     "cancelled",
+    "cleanup_timeout",
+    "cleanup_error",
+    "shutdown_timeout",
+    "cancellation_timeout",
 ]
 
-type RuntimeState = Literal["new", "starting", "ready", "busy", "failed", "closed"]
+type RuntimeState = Literal[
+    "new",
+    "starting",
+    "ready",
+    "busy",
+    "shutting_down",
+    "failed",
+    "closed",
+]
 type HealthState = Literal["starting", "ready", "busy", "failed", "closed"]
 type GenerationStatus = Literal["completed", "cancelled"]
 
@@ -391,5 +403,9 @@ def _error_code(value: object) -> None:
         "protocol_error",
         "output_limit",
         "cancelled",
+        "cleanup_timeout",
+        "cleanup_error",
+        "shutdown_timeout",
+        "cancellation_timeout",
     }:
         raise ProtocolError("invalid_field")

@@ -40,8 +40,8 @@ def test_start_streams_events_and_shuts_down_cleanly() -> None:
         assert model.ready
         assert model.health().state == "ready"
         handle = model.generate(ModelRequest("stream"))
+        result = handle.wait(2.0)
         events = list(handle)
-        result = handle.wait()
 
         assert result.text == "streamed"
         assert [type(event) for event in events] == [
@@ -66,17 +66,16 @@ def test_cancel_waits_for_terminal_event_and_recovers_in_same_process() -> None:
         assert isinstance(next(stream), TextDelta)
         assert model.cancel(cancelled.generation_id)
         assert model.cancel(cancelled.generation_id)
+        assert cancelled.wait(2.0).status == "cancelled"
         remaining = list(stream)
         assert any(isinstance(event, GenerationCancelled) for event in remaining)
         assert not any(
             isinstance(event, TextDelta) and event.delta == "STALE_LATE_DELTA"
             for event in remaining
         )
-        assert cancelled.wait().status == "cancelled"
-
         recovery = model.generate(ModelRequest("recovery"))
+        assert recovery.wait(2.0).text == "recovered"
         recovery_events = list(recovery)
-        assert recovery.wait().text == "recovered"
         assert [event.delta for event in recovery_events if isinstance(event, TextDelta)] == [
             "recovered"
         ]

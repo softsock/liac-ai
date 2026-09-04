@@ -20,6 +20,10 @@ export type ProtocolErrorCode =
   | "unsupported_output"
   | "protocol_error"
   | "output_limit"
+  | "cleanup_timeout"
+  | "cleanup_error"
+  | "shutdown_timeout"
+  | "cancellation_timeout"
   | "cancelled";
 
 export type ProtocolCommand = GenerateCommand | CancelCommand | HealthCommand | ShutdownCommand;
@@ -201,6 +205,10 @@ function assertErrorCode(value: unknown): asserts value is ProtocolErrorCode {
     value !== "unsupported_output" &&
     value !== "protocol_error" &&
     value !== "output_limit" &&
+    value !== "cleanup_timeout" &&
+    value !== "cleanup_error" &&
+    value !== "shutdown_timeout" &&
+    value !== "cancellation_timeout" &&
     value !== "cancelled"
   ) {
     throw new ProtocolError("invalid_field");
@@ -322,12 +330,27 @@ export function encodeEvent(event: ProtocolEvent): string {
 
 export async function* readProtocolLines(
   input: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<string, void, undefined> {
   const reader = input.getReader();
   let buffered = new Uint8Array(0);
+  let abortListener: (() => void) | undefined;
+  const aborted = signal
+    ? new Promise<undefined>((resolve) => {
+        const abort = (): void => {
+          void reader.cancel().catch(() => undefined);
+          resolve(undefined);
+        };
+        abortListener = abort;
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      })
+    : undefined;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const readResult = aborted ? await Promise.race([reader.read(), aborted]) : await reader.read();
+      if (readResult === undefined) return;
+      const { done, value } = readResult;
       if (done) break;
       const chunk = value;
       let lineStart = 0;
@@ -358,6 +381,7 @@ export async function* readProtocolLines(
     }
     if (buffered.length > 0) throw new ProtocolError("malformed");
   } finally {
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
     reader.releaseLock();
   }
 }

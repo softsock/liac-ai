@@ -173,6 +173,134 @@ describe("ModelSidecar", () => {
     expect(sidecar.state).toBe("ready");
   });
 
+  test("keeps cancellation bounded and poisons the sidecar when iterator cleanup hangs", async () => {
+    const events: SidecarEvent[] = [];
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      cleanupTimeoutMs: 10,
+      stream: makeStream(() => ({
+        async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+          return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+        },
+        async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+          return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+        },
+        [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+          return this as unknown as AsyncIterator<AssistantMessageEvent>;
+        },
+      })),
+      onEvent: (item) => events.push(item),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("blocked cleanup");
+    expect(sidecar.cancel(handle.requestId, handle.epoch)).toBe(true);
+
+    await expect(handle.result).rejects.toMatchObject({ code: "cleanup_timeout" });
+    expect(sidecar.state).toBe("failed");
+    expect(events.filter((item) => item.requestId === handle.requestId && item.type === "error")).toHaveLength(1);
+    expect(events.find((item) => item.requestId === handle.requestId && item.type === "error")).toMatchObject({
+      code: "cleanup_timeout",
+    });
+
+    const retry = sidecar.generate("must not reuse poisoned sidecar");
+    await expect(retry.result).rejects.toMatchObject({ code: "not_ready" });
+    await expect(sidecar.start()).rejects.toMatchObject({ code: "not_ready" });
+    await sidecar.close();
+  });
+
+  test("requires the provider result acknowledgement before declaring cleanup reusable", async () => {
+    let releaseResult: (() => void) | undefined;
+    const resultGate = new Promise<void>((resolve) => {
+      releaseResult = resolve;
+    });
+    let returnCalls = 0;
+    const stream = makeStream(() => {
+      const iterable = {
+        async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+          return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+        },
+        async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+          returnCalls += 1;
+          return { done: true, value: undefined };
+        },
+        [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+          return this as unknown as AsyncIterator<AssistantMessageEvent>;
+        },
+        result: async () => {
+          await resultGate;
+        },
+      };
+      return iterable;
+    });
+    const sidecar = createModelSidecar({ auth: new FakeAuth(), model, cleanupTimeoutMs: 10, stream });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("blocked producer acknowledgement");
+    expect(sidecar.cancel(handle.requestId)).toBe(true);
+    await expect(handle.result).rejects.toMatchObject({ code: "cleanup_timeout" });
+    expect(returnCalls).toBe(1);
+    expect(sidecar.state).toBe("failed");
+
+    releaseResult?.();
+  });
+
+  test("poisons the sidecar when provider cleanup rejects", async () => {
+    const events: SidecarEvent[] = [];
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      cleanupTimeoutMs: 100,
+      stream: makeStream(() => ({
+        async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+          return { done: false, value: event("text_delta", "partial") };
+        },
+        async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+          throw new Error("cleanup failed");
+        },
+        [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+          return this as unknown as AsyncIterator<AssistantMessageEvent>;
+        },
+      })),
+      onEvent: (item) => events.push(item),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("cleanup rejection");
+    expect(sidecar.cancel(handle.requestId)).toBe(true);
+    await expect(handle.result).rejects.toMatchObject({ code: "cleanup_error" });
+    expect(sidecar.state).toBe("failed");
+    expect(events.filter((item) => item.type === "error" && item.requestId === handle.requestId)).toHaveLength(1);
+  });
+
+  test("installs active request before request notification so an immediate cancel is honored", async () => {
+    const events: SidecarEvent[] = [];
+    let sidecar: ReturnType<typeof createModelSidecar>;
+    sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      stream: makeStream(async function* () {
+        yield event("text_delta", "should be discarded after cancel");
+        yield event("done");
+      }),
+      onEvent: (item) => {
+        events.push(item);
+        if (item.type === "request_received") sidecar.cancel(item.requestId ?? "", item.epoch);
+      },
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("cancel from observer");
+    await expect(handle.result).resolves.toMatchObject({ status: "cancelled" });
+    expect(events.map((item) => item.type)).toContain("cancelled");
+    expect(events.filter((item) => item.type === "completed")).toHaveLength(0);
+  });
+
   test("uses the auth resolver boundary and omits tools and provider session state", async () => {
     const auth = new FakeAuth();
     let capturedContext: Context | undefined;

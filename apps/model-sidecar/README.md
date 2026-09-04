@@ -1,18 +1,42 @@
 # Lilavel model sidecar
 
-This is a small long-lived direct model boundary for independent requests. It
-discovers OMP authentication through `discoverAuthStorage`, selects the
-bundled `openai-codex/gpt-5.6-luna` model, and invokes pi-ai's `streamSimple`
-without an agent loop, tools, or provider session state.
+This package is the provider and process transport boundary for independent
+model requests. It pins `@oh-my-pi/pi-ai@18.1.2` and
+`@oh-my-pi/pi-catalog@18.1.2`, discovers supported OMP authentication through
+the auth broker, selects `openai-codex/gpt-5.6-luna`, and invokes
+`streamSimple` directly. It has no OMP `AgentSession`, MCP/tools, or semantic
+conversation history.
 
-The importable API is `createModelSidecar`. Call `start()` once, then call
-`generate(prompt)` and consume the returned handle's `result` promise. Text is
-made available immediately through the `text_delta` event sink. Call
-`cancel(requestId)` to abort the active request and `close()` during shutdown.
+## Importable API
 
-The persistent protocol host is `bun run protocol`. It reads UTF-8 JSONL
-commands from stdin and writes only version-one JSONL protocol events to
-stdout. The supported commands are:
+Create the sidecar with `createModelSidecar()`, call `start()` once, and then
+call `generate(prompt)` for one request at a time. `start()` loads local auth
+and the pinned model before emitting `ready`. That event, and the `state`
+property, describe local sidecar/model readiness; they do not prove provider
+endpoint availability, quota, or live entitlement.
+
+`generate()` returns a handle with a `result` promise and request identity.
+The sidecar emits incremental `text_delta` events while the promise is
+pending. `cancel(requestId)` aborts provider work. Cancellation is an intent,
+so a provider completion can win a completion/cancellation race. `close()`
+aborts active work and closes auth; the protocol host supplies the outer
+shutdown deadline when the sidecar runs as a process.
+
+Normal provider completion, cancellation, or failure can release the sidecar
+for another request only after provider cleanup resolves. Cleanup waits for
+the async iterator's `return()` and, when present, the stream's
+`result()` acknowledgement under one default 5-second `cleanupTimeoutMs`
+deadline. A cleanup rejection emits `cleanup_error`; a timeout emits
+`cleanup_timeout`. Either outcome rejects the request, poisons the sidecar,
+sets it to `failed`, and prevents `ready` or same-process reuse. The sidecar
+does not pretend that unconfirmed cleanup succeeded; a failed instance cannot
+be started again.
+
+## Persistent protocol host
+
+Run `bun run protocol` for the long-lived JSONL host. It reads UTF-8 commands
+from stdin and writes only version-one JSONL protocol events to stdout. Human
+diagnostics belong on stderr. The supported commands are:
 
 ```json
 {"protocol_version":1,"type":"generate","generation_id":"uuid","epoch":1,"prompt":"Reply exactly OK."}
@@ -21,14 +45,44 @@ stdout. The supported commands are:
 {"protocol_version":1,"type":"shutdown"}
 ```
 
-The host emits `ready` before accepting generations, forwards genuine
-incremental `text_delta` events, emits one terminal generation event, and
-awaits provider cleanup before accepting the next generation. Core owns
-generation lifecycle and semantic state; the host owns only provider and
-process transport state.
+The host emits `ready`, accepts one active generation, forwards genuine
+`text_delta` events, and emits at most one generation terminal event. The
+generation events are `accepted`, `text_delta`, `completed`, `cancelled`, and
+`failed`; local host events are `ready`, `health`, and `shutdown`. Every
+generation-scoped frame carries `generation_id` and `epoch`.
 
-For a local diagnostic run, use `bun run smoke -- "prompt"`. Its stdout is
-diagnostic event JSON lines. It performs no login flow and does not print
-credentials, request text, provider errors, headers, or tokens. The temporary
-live probes are `bun run probe -- cancel-recovery` and `bun run probe -- isolation`;
-both use the same sidecar process for their checks.
+The host's default bounded deadlines are 30 seconds for startup, 5 seconds
+for terminal cleanup before reuse, 5 seconds for shutdown, and 5 seconds for
+each stdout write that reports backpressure. Its protocol writer retains at
+most 64 pending frames and 512 KiB of pending encoded output. A stalled
+`drain` or an output-buffer limit is fatal, aborts pending input, and makes
+`ProtocolServer.run()` return a nonzero exit code. Core's cancellation and
+shutdown deadlines provide outer process containment. An output-limit terminal is held
+until provider cancellation and cleanup finish; a cleanup failure wins and
+poisons the host.
+
+If shutdown exceeds its deadline, the host emits one generation-scoped
+`shutdown_timeout` failure when needed, marks the host fatal, and invokes its
+forced-exit hook with code 1. A clean `shutdown` acknowledgement is emitted
+only after the sidecar closes successfully. `cleanup_timeout` and
+`cleanup_error` are fatal even if an earlier terminal frame was already
+observed; they never produce a second generation terminal frame.
+
+The version-one protocol enforces a 256 KiB frame, 64 KiB prompt, 16 KiB
+delta, 256 KiB response, and 128-byte identity bounds. Invalid framing or
+fields are rejected by the parser; Core fails closed on future or mismatched
+generation identities. Core owns the generation lifecycle and semantic state;
+this host owns provider and process transport state only.
+
+When Core launches the host on Windows, it starts the default `npx` launcher
+suspended, verifies Job Object containment, and resumes it only after the
+containment handle is attached. Forced containment therefore covers the
+`npx`/Node/cmd/Bun descendant tree. If containment setup fails, Core fails
+closed. The POSIX fallback targets the owned process and does not claim the
+same descendant guarantee.
+
+For a local diagnostic run, use `bun run smoke -- "prompt"`. Its diagnostic
+event JSON is temporary output and does not print credentials, request text,
+provider errors, headers, or tokens. The temporary live probes are
+`bun run probe -- cancel-recovery` and `bun run probe -- isolation`; both use
+the same sidecar process for their checks.

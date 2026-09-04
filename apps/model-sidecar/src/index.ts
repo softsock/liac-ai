@@ -78,6 +78,8 @@ export type SidecarErrorCode =
   | "unsupported_output"
   | "cancelled"
   | "response_limit"
+  | "cleanup_timeout"
+  | "cleanup_error"
   | "internal_error";
 
 export interface GenerationIdentity {
@@ -107,6 +109,11 @@ export interface ModelSidecarOptions {
   onEvent?: (event: SidecarEvent) => void;
   now?: () => number;
   createRequestId?: () => string;
+  /**
+   * Maximum time allowed for provider iterator/producer cleanup after a
+   * generation ends. A timeout poisons this sidecar instance.
+   */
+  cleanupTimeoutMs?: number;
 }
 
 export class SidecarError extends Error {
@@ -131,6 +138,17 @@ interface RequestDiagnostics {
   readonly epoch: number;
   readonly startedAt: number;
   readonly marks: LatencyMarks;
+}
+
+type ResultBearingStream = AsyncIterable<AssistantMessageEvent> & {
+  result?: () => Promise<unknown>;
+};
+
+class CleanupTimeoutError extends Error {
+  constructor() {
+    super("provider cleanup timed out");
+    this.name = "CleanupTimeoutError";
+  }
 }
 
 function defaultModel(): SidecarModel {
@@ -170,6 +188,8 @@ export class ModelSidecar {
   readonly #onEvent: (event: SidecarEvent) => void;
   readonly #now: () => number;
   readonly #createRequestId: () => string;
+  readonly #cleanupTimeoutMs: number;
+  #poisoned = false;
 
   constructor(options: ModelSidecarOptions = {}) {
     this.#auth = options.auth;
@@ -180,6 +200,10 @@ export class ModelSidecar {
     this.#onEvent = options.onEvent ?? (() => undefined);
     this.#now = options.now ?? (() => performance.now());
     this.#createRequestId = options.createRequestId ?? (() => randomUUID());
+    this.#cleanupTimeoutMs = options.cleanupTimeoutMs ?? 5_000;
+    if (!Number.isFinite(this.#cleanupTimeoutMs) || this.#cleanupTimeoutMs <= 0) {
+      throw new RangeError("cleanupTimeoutMs must be a positive finite number");
+    }
   }
 
   get state(): SidecarState {
@@ -193,6 +217,7 @@ export class ModelSidecar {
   async start(): Promise<void> {
     if (this.#state === "ready" || this.#state === "busy") return;
     if (this.#state === "closed" || this.#closed) throw new SidecarError("closed");
+    if (this.#state === "failed" || this.#poisoned) throw new SidecarError("not_ready");
     if (this.#startPromise) return this.#startPromise;
 
     this.#state = "starting";
@@ -225,13 +250,20 @@ export class ModelSidecar {
     };
     const controller = new AbortController();
     this.#state = "busy";
-    this.#emit("request_received", diagnostics, {});
-
-    const promise = this.#runRequest(prompt, model, auth, controller, diagnostics);
+    let resolveResult!: (result: GenerationResult) => void;
+    let rejectResult!: (error: unknown) => void;
+    const promise = new Promise<GenerationResult>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
     this.#active = { requestId, epoch, controller, promise };
+    // Install the active record before notifying observers. This makes a
+    // cancel issued from an accepted/request callback deterministic too.
+    this.#emit("request_received", diagnostics, {});
+    void this.#runRequest(prompt, model, auth, controller, diagnostics).then(resolveResult, rejectResult);
     const cleanup = () => {
       if (this.#active?.requestId === requestId) this.#active = undefined;
-      if (!this.#closed) this.#state = "ready";
+      if (!this.#closed && !this.#poisoned) this.#state = "ready";
     };
     void promise.then(cleanup, cleanup);
     return { requestId, generationId: requestId, epoch, result: promise };
@@ -293,6 +325,7 @@ export class ModelSidecar {
   ): Promise<GenerationResult> {
     let text = "";
     let iterator: AsyncIterator<AssistantMessageEvent> | undefined;
+    let providerResult: (() => Promise<unknown>) | undefined;
     let result: GenerationResult | undefined;
     let failure: SidecarError | undefined;
     try {
@@ -311,6 +344,8 @@ export class ModelSidecar {
         signal: controller.signal,
         preferWebsockets: false,
       });
+      const resultMethod = (stream as ResultBearingStream).result;
+      if (typeof resultMethod === "function") providerResult = () => resultMethod.call(stream);
       iterator = stream[Symbol.asyncIterator]();
       let firstEvent = true;
       while (true) {
@@ -349,13 +384,12 @@ export class ModelSidecar {
       else if (error instanceof SidecarError) failure = error;
       else failure = new SidecarError("provider_error");
     } finally {
-      if (iterator) {
-        try {
-          await iterator.return?.();
-        } catch {
-          // Provider cleanup must be awaited, but a cleanup error must not
-          // replace the already-classified request result.
-        }
+      const cleanupFailure = await this.#cleanup(iterator, providerResult);
+      if (cleanupFailure) {
+        failure = cleanupFailure;
+        result = undefined;
+        this.#poisoned = true;
+        this.#state = "failed";
       }
     }
     if (result?.status === "cancelled") {
@@ -373,11 +407,46 @@ export class ModelSidecar {
     throw terminalFailure;
   }
 
+  async #cleanup(
+    iterator: AsyncIterator<AssistantMessageEvent> | undefined,
+    providerResult: (() => Promise<unknown>) | undefined,
+  ): Promise<SidecarError | undefined> {
+    if (!iterator && !providerResult) return undefined;
+
+    const operations: Promise<unknown>[] = [];
+    if (iterator) {
+      const iteratorCleanup = Promise.resolve().then(() => iterator.return?.());
+      // A timed-out race may leave the provider promise running; observe its
+      // eventual rejection so containment never creates an unhandled error.
+      void iteratorCleanup.catch(() => undefined);
+      operations.push(iteratorCleanup);
+    }
+    if (providerResult) {
+      const resultCleanup = Promise.resolve().then(providerResult);
+      void resultCleanup.catch(() => undefined);
+      operations.push(resultCleanup);
+    }
+
+    const allCleanup = Promise.all(operations);
+    void allCleanup.catch(() => undefined);
+    try {
+      await this.#withTimeout(allCleanup, this.#cleanupTimeoutMs);
+      return undefined;
+    } catch (error) {
+      return new SidecarError(error instanceof CleanupTimeoutError ? "cleanup_timeout" : "cleanup_error");
+    }
+  }
+
   async #nextOrCancelled<T>(
     next: Promise<IteratorResult<T>>,
     signal: AbortSignal,
   ): Promise<IteratorResult<T>> {
-    if (signal.aborted) throw new SidecarError("cancelled");
+    if (signal.aborted) {
+      // next() has already been called. Observe a late provider rejection even
+      // when cancellation wins before we attach the normal race handlers.
+      void next.catch(() => undefined);
+      throw new SidecarError("cancelled");
+    }
     let abortListener: (() => void) | undefined;
     const abort = new Promise<never>((_, reject) => {
       abortListener = () => reject(new SidecarError("cancelled"));
@@ -390,6 +459,20 @@ export class ModelSidecar {
       throw error;
     } finally {
       if (abortListener) signal.removeEventListener("abort", abortListener);
+    }
+  }
+
+  async #withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new CleanupTimeoutError()), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 

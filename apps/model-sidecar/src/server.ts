@@ -12,6 +12,7 @@ import {
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_TERMINAL_CLEANUP_TIMEOUT_MS = 5_000;
+const DEFAULT_WRITE_TIMEOUT_MS = 5_000;
 const MAX_PENDING_FRAMES = 64;
 const MAX_PENDING_BYTES = PROTOCOL_LIMITS.maxFrameBytes * 2;
 
@@ -29,21 +30,24 @@ export interface ProtocolServerOptions {
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   terminalCleanupTimeoutMs?: number;
+  writeTimeoutMs?: number;
   forceExit?: (code: number) => void;
 }
 
 class ProtocolWriter {
   readonly #output: ProtocolOutput;
   readonly #onFailure: (error: Error) => void;
+  readonly #writeTimeoutMs: number;
   readonly #queue: string[] = [];
   #pendingBytes = 0;
   #drainPromise: Promise<void> | undefined;
   #failure: Error | undefined;
   #closed = false;
 
-  constructor(output: ProtocolOutput, onFailure: (error: Error) => void) {
+  constructor(output: ProtocolOutput, onFailure: (error: Error) => void, writeTimeoutMs: number) {
     this.#output = output;
     this.#onFailure = onFailure;
+    this.#writeTimeoutMs = writeTimeoutMs;
   }
 
   write(event: ProtocolEvent): boolean {
@@ -67,8 +71,7 @@ class ProtocolWriter {
   }
 
   async flush(): Promise<void> {
-    const pending = this.#drainPromise;
-    if (pending) await pending;
+    while (this.#drainPromise) await this.#drainPromise;
     if (this.#failure) throw this.#failure;
   }
 
@@ -85,6 +88,9 @@ class ProtocolWriter {
       .catch(() => undefined)
       .finally(() => {
         if (this.#drainPromise === pending) this.#drainPromise = undefined;
+        // More frames can arrive after a synchronous drain finished but
+        // before its promise is cleared. Keep that backlog moving too.
+        if (this.#queue.length > 0 && !this.#failure) this.#startDrain();
       });
   }
 
@@ -100,7 +106,25 @@ class ProtocolWriter {
         this.#fail(error instanceof Error ? error : new Error("protocol output failed"));
         throw this.#failure;
       }
-      if (!accepted) await new Promise<void>((resolve) => this.#output.once("drain", resolve));
+      if (!accepted) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("protocol output write timed out")), this.#writeTimeoutMs);
+            try {
+              this.#output.once("drain", () => {
+                clearTimeout(timer);
+                resolve();
+              });
+            } catch (error) {
+              clearTimeout(timer);
+              reject(error);
+            }
+          });
+        } catch (error) {
+          this.#fail(error instanceof Error ? error : new Error("protocol output failed"));
+          throw this.#failure;
+        }
+      }
     }
   }
 
@@ -120,12 +144,14 @@ interface ActiveGeneration {
   readonly resolveFinished: () => void;
   handle: GenerationHandle | undefined;
   cancelRequested: boolean;
+  outputLimitExceeded: boolean;
   terminal: boolean;
   responseBytes: number;
 }
 
 export class ProtocolServer {
   readonly #input: ReadableStream<Uint8Array>;
+  readonly #inputAbortController = new AbortController();
   readonly #writer: ProtocolWriter;
   readonly #sidecar: ModelSidecar;
   readonly #startupTimeoutMs: number;
@@ -143,13 +169,18 @@ export class ProtocolServer {
     this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.#shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.#terminalCleanupTimeoutMs = options.terminalCleanupTimeoutMs ?? DEFAULT_TERMINAL_CLEANUP_TIMEOUT_MS;
+    const writeTimeoutMs = options.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS;
+    if (!Number.isFinite(writeTimeoutMs) || writeTimeoutMs <= 0) {
+      throw new RangeError("writeTimeoutMs must be a positive finite number");
+    }
     this.#forceExit = options.forceExit ?? ((code) => process.exit(code));
     this.#writer = new ProtocolWriter(
       options.output ?? (process.stdout as unknown as ProtocolOutput),
       () => {
-        this.#fatal = true;
+        this.#markFatal();
         if (this.#active?.handle) this.#sidecar.cancel(this.#active.generationId, this.#active.epoch);
       },
+      writeTimeoutMs,
     );
     const onEvent = (event: SidecarEvent): void => this.#handleSidecarEvent(event);
     this.#sidecar = options.createSidecar?.(onEvent) ?? createModelSidecar({ onEvent });
@@ -168,7 +199,7 @@ export class ProtocolServer {
 
     let exitCode = 0;
     try {
-      for await (const line of readProtocolLines(this.#input)) {
+      for await (const line of readProtocolLines(this.#input, this.#inputAbortController.signal)) {
         if (this.#fatal) {
           exitCode = 1;
           break;
@@ -212,7 +243,7 @@ export class ProtocolServer {
         return true;
       case "shutdown":
         this.#closing = true;
-        if (!(await this.#closeSidecar())) return false;
+        if (!(await this.#closeSidecar()) || this.#fatal) return false;
         this.#writeEvent({ protocol_version: 1, type: "shutdown" });
         await this.#writer.flush().catch(() => undefined);
         return false;
@@ -247,6 +278,7 @@ export class ProtocolServer {
       resolveFinished,
       handle: undefined,
       cancelRequested: false,
+      outputLimitExceeded: false,
       terminal: false,
       responseBytes: 0,
     };
@@ -327,8 +359,10 @@ export class ProtocolServer {
         const deltaBytes = new TextEncoder().encode(event.delta).length;
         if (active.responseBytes + deltaBytes > PROTOCOL_LIMITS.maxResponseBytes) {
           active.cancelRequested = true;
-          active.terminal = true;
-          this.#writeFailed(active.generationId, active.epoch, "output_limit");
+          // Keep the generation active until the sidecar confirms terminal
+          // cleanup. This prevents a ready/reuse window while provider work
+          // is still unwinding.
+          active.outputLimitExceeded = true;
           this.#sidecar.cancel(active.generationId, active.epoch);
           return;
         }
@@ -348,24 +382,30 @@ export class ProtocolServer {
         const active = this.#active;
         if (!active || !this.#matches(active, event) || active.terminal) return;
         active.terminal = true;
-        this.#writeEvent({
-          protocol_version: 1,
-          type: "completed",
-          generation_id: active.generationId,
-          epoch: active.epoch,
-        });
+        if (active.outputLimitExceeded) this.#writeFailed(active.generationId, active.epoch, "output_limit");
+        else {
+          this.#writeEvent({
+            protocol_version: 1,
+            type: "completed",
+            generation_id: active.generationId,
+            epoch: active.epoch,
+          });
+        }
         return;
       }
       case "cancelled": {
         const active = this.#active;
         if (!active || !this.#matches(active, event) || active.terminal) return;
         active.terminal = true;
-        this.#writeEvent({
-          protocol_version: 1,
-          type: "cancelled",
-          generation_id: active.generationId,
-          epoch: active.epoch,
-        });
+        if (active.outputLimitExceeded) this.#writeFailed(active.generationId, active.epoch, "output_limit");
+        else {
+          this.#writeEvent({
+            protocol_version: 1,
+            type: "cancelled",
+            generation_id: active.generationId,
+            epoch: active.epoch,
+          });
+        }
         return;
       }
       case "error":
@@ -379,15 +419,25 @@ export class ProtocolServer {
 
   #handleSidecarError(event: Extract<SidecarEvent, { type: "error" }>): void {
     const code = toProtocolErrorCode(event.code);
+    const poisoned = code === "cleanup_timeout" || code === "cleanup_error";
     if (!event.requestId) {
       this.#startupFailureSeen = code === "startup_error";
       this.#writeFailed(undefined, undefined, code);
+      if (poisoned) this.#markFatal();
       return;
     }
     const active = this.#active;
+    // Cleanup failures poison the whole sidecar, even if a prior terminal
+    // event (for example output_limit) already settled this generation.
+    // Never emit a second generation terminal, but do stop accepting work.
+    if (poisoned) this.#markFatal();
     if (!active || !this.#matches(active, event) || active.terminal) return;
     active.terminal = true;
-    this.#writeFailed(active.generationId, active.epoch, code);
+    this.#writeFailed(
+      active.generationId,
+      active.epoch,
+      active.outputLimitExceeded && code === "cancelled" ? "output_limit" : code,
+    );
   }
 
   #writeHealth(): void {
@@ -417,13 +467,30 @@ export class ProtocolServer {
     active.resolveFinished();
   }
 
+  #markFatal(): void {
+    if (this.#fatal) return;
+    this.#fatal = true;
+    this.#inputAbortController.abort();
+  }
+
   async #closeSidecar(): Promise<boolean> {
     try {
       await this.#withTimeout(this.#sidecar.close(), this.#shutdownTimeoutMs);
       return true;
     } catch {
-      this.#fatal = true;
-      this.#forceExit(1);
+      const active = this.#active;
+      if (active && !active.terminal) {
+        active.terminal = true;
+        this.#writeFailed(active.generationId, active.epoch, "shutdown_timeout");
+        this.#finishActive(active);
+      }
+      this.#markFatal();
+      try {
+        this.#forceExit(1);
+      } catch {
+        // A test or embedding host may provide a throwing exit hook. The
+        // protocol still reports the forced shutdown as failed below.
+      }
       return false;
     }
   }
@@ -451,14 +518,17 @@ export class ProtocolServer {
 function splitDelta(delta: string): string[] {
   const chunks: string[] = [];
   let current = "";
+  let currentBytes = 0;
   const encoder = new TextEncoder();
   for (const character of delta) {
-    const candidate = current + character;
-    if (current.length > 0 && encoder.encode(candidate).length > PROTOCOL_LIMITS.maxDeltaBytes) {
+    const characterBytes = encoder.encode(character).length;
+    if (current.length > 0 && currentBytes + characterBytes > PROTOCOL_LIMITS.maxDeltaBytes) {
       chunks.push(current);
       current = character;
+      currentBytes = characterBytes;
     } else {
-      current = candidate;
+      current += character;
+      currentBytes += characterBytes;
     }
   }
   if (current.length > 0) chunks.push(current);
@@ -476,6 +546,10 @@ function toProtocolErrorCode(code: string): ProtocolErrorCode {
     code === "unsupported_output" ||
     code === "protocol_error" ||
     code === "output_limit" ||
+    code === "cleanup_timeout" ||
+    code === "cleanup_error" ||
+    code === "shutdown_timeout" ||
+    code === "cancellation_timeout" ||
     code === "cancelled"
   ) {
     return code;

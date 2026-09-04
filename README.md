@@ -7,10 +7,11 @@ Lilavel is a communication-first AI system. Natural, responsive text interaction
 - [`AGENTS.md`](AGENTS.md) — project-specific operating contract.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — established ownership boundaries and interaction invariants.
 - [`docs/STACK.md`](docs/STACK.md) — selected runtime and provider-layer technologies.
+- [`apps/core/README.md`](apps/core/README.md) — current Core runtime and streaming-consumer contract.
 
-## P0.1 foundation
+## Repository foundation (P0.1 historical)
 
-Lilavel Core is an importable Python 3.12 package managed with `uv` under [`apps/core`](apps/core). The model sidecar is an independent TypeScript package managed with Bun under [`apps/model-sidecar`](apps/model-sidecar). Core owns product semantics; the sidecar provides only the direct model transport and the local runtime boundary described below.
+P0.1 established Lilavel Core as an importable Python 3.12 package managed with `uv` under [`apps/core`](apps/core), alongside an independent TypeScript package managed with Bun under [`apps/model-sidecar`](apps/model-sidecar). The current ownership boundary is described in [Architecture](docs/ARCHITECTURE.md).
 
 The commands below assume Python 3.12 or newer, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), and [Node.js](https://nodejs.org/en/download) with `npm`/`npx` are installed on the host. Use the [Python](https://www.python.org/downloads/) installer if Python is missing. Check the prerequisites first:
 
@@ -42,9 +43,9 @@ npx --yes bun@1.4.0 run check
 npx --yes bun@1.4.0 test
 ```
 
-## P0.2 direct model sidecar
+## P0.2 direct model sidecar (historical transport milestone)
 
-The sidecar now provides the first direct model-transport boundary. It pins
+P0.2 established the direct model-transport boundary. It pins
 `@oh-my-pi/pi-ai@18.1.2` and `@oh-my-pi/pi-catalog@18.1.2`, discovers supported
 OMP authentication internally, selects `openai-codex/gpt-5.6-luna`, and emits
 incremental text events through `streamSimple`. It does not start an OMP
@@ -64,13 +65,15 @@ npx --yes bun@1.4.0 run probe -- cancel-recovery
 npx --yes bun@1.4.0 run probe -- isolation
 ```
 
-## P0.3 Core ↔ sidecar runtime
+## Current P0.3 Core ↔ sidecar runtime
 
 `apps/core` exposes `ModelRuntime`, which starts the persistent sidecar, waits
 for its `ready` event, submits one small `ModelRequest` at a time, streams
 `TextDelta` events, cancels by generation ID, reports health, and shuts the
 process down. Core creates a unique generation ID and epoch for each request;
-the sidecar does not retain semantic conversation state.
+the sidecar does not retain semantic conversation state. See the [Core runtime
+contract](apps/core/README.md) for lifecycle, settlement, and event-consumer
+semantics.
 
 The runtime uses UTF-8 newline-delimited JSON on the sidecar's stdin/stdout.
 Every frame has `protocol_version: 1`. Commands are `generate`, `cancel`,
@@ -86,8 +89,13 @@ Set-Location apps/model-sidecar
 npx --yes bun@1.4.0 run protocol
 ```
 
-The host authenticates and loads the configured direct model before emitting `ready`.
-It permits one active generation, aborts and cleans up provider work for
-`cancel`, and remains reusable for the next generation. Core ignores
-well-formed late events from older or cancelled generations and treats
-malformed output or unexpected process death as a failure.
+The host authenticates and loads the configured direct model before emitting
+`ready`. `ready` and `health` describe local model, sidecar, and process state;
+they do not verify provider endpoint availability, quota, or live entitlement.
+The host permits one active generation and aborts and cleans up provider work
+for `cancel`. Confirmed normal cleanup permits same-process reuse; rejected or
+timed-out cleanup poisons the sidecar and leaves it unusable. Cancellation is
+an intent: an in-flight `accepted` event may arrive after cancellation, and a
+valid completion may win a completion/cancellation race. Core ignores
+well-formed late events from older or cancelled generations, while malformed,
+future, mismatched, or otherwise invalid protocol events fail closed.

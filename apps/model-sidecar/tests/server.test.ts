@@ -7,6 +7,7 @@ import {
   type SidecarModel,
   type StreamSimple,
 } from "../src/index.js";
+import { PROTOCOL_LIMITS } from "../src/protocol.js";
 import { ProtocolServer, type ProtocolOutput } from "../src/server.js";
 
 const model = {
@@ -178,4 +179,185 @@ test("protocol server fails startup when the sidecar omits the ready handshake",
 
   expect(await server.run()).toBe(1);
   expect(output.frames()).toEqual([{ protocol_version: 1, type: "failed", code: "startup_error" }]);
+});
+
+test("protocol server emits one cleanup failure and exits when cancellation poisons the sidecar", async () => {
+  const input = new InputQueue();
+  const output = new CaptureOutput();
+  let cancelSent = false;
+  const server = new ProtocolServer({
+    input: input.stream,
+    output,
+    createSidecar: (onEvent) =>
+      createModelSidecar({
+        auth: new FakeAuth(),
+        model,
+        cleanupTimeoutMs: 10,
+        stream: ((_: Model<"openai-codex-responses">, _context, _options) => ({
+          async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+            return this as unknown as AsyncIterator<AssistantMessageEvent>;
+          },
+        })) as StreamSimple,
+        onEvent: (event) => {
+          onEvent(event);
+          if (event.type === "request_received" && !cancelSent) {
+            cancelSent = true;
+            input.push(command("cancel", event.requestId ?? "", event.epoch ?? 0));
+          }
+        },
+      }),
+  });
+
+  input.push(command("generate", "poisoned", 1, "hang"));
+  const exitCode = await server.run();
+  const frames = output.frames();
+
+  expect(exitCode).toBe(1);
+  expect(frames.filter((frame) => frame.type === "failed")).toEqual([
+    { protocol_version: 1, type: "failed", generation_id: "poisoned", epoch: 1, code: "cleanup_timeout" },
+  ]);
+  expect(frames.filter((frame) => frame.type === "cancelled")).toHaveLength(0);
+});
+
+test("defers output-limit terminal failure until provider cleanup completes", async () => {
+  const input = new InputQueue();
+  const output = new CaptureOutput();
+  let releaseCleanup: (() => void) | undefined;
+  const cleanupGate = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  const server = new ProtocolServer({
+    input: input.stream,
+    output,
+    createSidecar: (onEvent) =>
+      createModelSidecar({
+        auth: new FakeAuth(),
+        model,
+        stream: makeStream(async function* (_context, options) {
+          try {
+            yield providerEvent("text_delta", "x".repeat(PROTOCOL_LIMITS.maxResponseBytes));
+            yield providerEvent("text_delta", "overflow");
+          } finally {
+            input.push(JSON.stringify({ protocol_version: 1, type: "health" }));
+            await cleanupGate;
+          }
+        }),
+        onEvent: (event) => {
+          onEvent(event);
+          if (event.type === "cancelled") {
+            input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+          }
+        },
+      }),
+  });
+
+  input.push(command("generate", "limited", 1, "limit"));
+  const releaseTimer = setTimeout(() => releaseCleanup?.(), 15);
+  const exitCode = await server.run();
+  clearTimeout(releaseTimer);
+  const frames = output.frames();
+  const healthIndex = frames.findIndex((frame) => frame.type === "health");
+  const failedIndex = frames.findIndex((frame) => frame.type === "failed");
+
+  expect(exitCode).toBe(0);
+  expect(healthIndex).toBeGreaterThan(-1);
+  expect(frames[healthIndex]).toMatchObject({ protocol_version: 1, type: "health", state: "busy" });
+  expect(failedIndex).toBeGreaterThan(-1);
+  expect(frames.filter((frame) => frame.type === "failed")).toEqual([
+    { protocol_version: 1, type: "failed", generation_id: "limited", epoch: 1, code: "output_limit" },
+  ]);
+  expect(frames.filter((frame) => frame.type === "cancelled")).toHaveLength(0);
+});
+
+test("settles an active generation before forced shutdown timeout", async () => {
+  const input = new InputQueue();
+  const output = new CaptureOutput();
+  const exitCalls: number[] = [];
+  const server = new ProtocolServer({
+    input: input.stream,
+    output,
+    shutdownTimeoutMs: 10,
+    createSidecar: (onEvent) =>
+      createModelSidecar({
+        auth: new FakeAuth(),
+        model,
+        cleanupTimeoutMs: 100,
+        stream: ((_: Model<"openai-codex-responses">, _context, _options) => ({
+          async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+            return this as unknown as AsyncIterator<AssistantMessageEvent>;
+          },
+        })) as StreamSimple,
+        onEvent,
+      }),
+    forceExit: (code) => exitCalls.push(code),
+  });
+
+  input.push(command("generate", "shutdown-race", 1, "hang"));
+  input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+  const exitCode = await server.run();
+  const frames = output.frames();
+
+  expect(exitCode).toBe(1);
+  expect(exitCalls).toEqual([1]);
+  expect(frames.filter((frame) => frame.type === "failed")).toEqual([
+    { protocol_version: 1, type: "failed", generation_id: "shutdown-race", epoch: 1, code: "shutdown_timeout" },
+  ]);
+  expect(frames.filter((frame) => frame.type === "shutdown")).toHaveLength(0);
+});
+
+test("does not acknowledge clean shutdown after cleanup poisons the sidecar", async () => {
+  const input = new InputQueue();
+  const output = new CaptureOutput();
+  const server = new ProtocolServer({
+    input: input.stream,
+    output,
+    shutdownTimeoutMs: 100,
+    createSidecar: (onEvent) =>
+      createModelSidecar({
+        auth: new FakeAuth(),
+        model,
+        cleanupTimeoutMs: 10,
+        stream: ((_: Model<"openai-codex-responses">, _context, _options) => ({
+          async next(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          async return(): Promise<IteratorResult<AssistantMessageEvent>> {
+            return await new Promise<IteratorResult<AssistantMessageEvent>>(() => undefined);
+          },
+          [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+            return this as unknown as AsyncIterator<AssistantMessageEvent>;
+          },
+        })) as StreamSimple,
+        onEvent,
+      }),
+  });
+
+  input.push(command("generate", "cleanup-shutdown", 1, "hang"));
+  input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+  const exitCode = await server.run();
+  const frames = output.frames();
+
+  expect(exitCode).toBe(1);
+  expect(frames.filter((frame) => frame.type === "failed")).toEqual([
+    {
+      protocol_version: 1,
+      type: "failed",
+      generation_id: "cleanup-shutdown",
+      epoch: 1,
+      code: "cleanup_timeout",
+    },
+  ]);
+  expect(frames.filter((frame) => frame.type === "shutdown")).toHaveLength(0);
 });

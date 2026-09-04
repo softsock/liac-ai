@@ -1,6 +1,8 @@
 """Importable package boundary for Lilavel Core."""
 
 from .runtime import (
+    CancellationTimeout,
+    EventQueueOverflow,
     GenerationFailed,
     GenerationHandle,
     GenerationResult,
@@ -10,6 +12,7 @@ from .runtime import (
     RuntimeBusy,
     RuntimeHealth,
     RuntimeNotReady,
+    RuntimeShuttingDown,
     RuntimeStartTimeout,
     ShutdownTimeout,
     SidecarCrashed,
@@ -38,6 +41,8 @@ __all__ = [
     "GenerationFailed",
     "GenerationHandle",
     "GenerationResult",
+    "CancellationTimeout",
+    "EventQueueOverflow",
     "HealthEvent",
     "ModelRequest",
     "ModelRuntime",
@@ -47,6 +52,7 @@ __all__ = [
     "RuntimeHealth",
     "RuntimeNotReady",
     "RuntimeStartTimeout",
+    "RuntimeShuttingDown",
     "ReadyEvent",
     "ShutdownTimeout",
     "SidecarCrashed",

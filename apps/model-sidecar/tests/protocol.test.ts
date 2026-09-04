@@ -26,6 +26,17 @@ describe("sidecar protocol", () => {
 
     expect(parseCommand(encodeCommand(command).trim())).toEqual(command);
     expect(JSON.parse(encodeEvent(event)) as typeof event).toEqual(event);
+    expect(
+      JSON.parse(
+        encodeEvent({
+          protocol_version: 1,
+          type: "failed",
+          generation_id: "generation-1",
+          epoch: 3,
+          code: "cleanup_timeout",
+        }),
+      ),
+    ).toMatchObject({ type: "failed", code: "cleanup_timeout" });
   });
 
   test("rejects unknown fields, invalid versions, and oversized values", () => {
