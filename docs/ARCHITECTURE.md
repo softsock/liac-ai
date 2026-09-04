@@ -8,6 +8,21 @@ Lilavel Core owns semantic conversation state, conversation history, memory, and
 
 Provider and sidecar code may own authentication, network, and transport state. That state must not silently become Lilavel's semantic conversation memory, and character behavior must not be delegated to the provider transport.
 
+`ConversationCore` is the narrow semantic layer above `ModelRuntime`. It
+accepts each user message into canonical history immediately. A
+`ConversationRun` exposes streamed assistant deltas as transient candidate
+output; only one successful completion is committed as the canonical assistant
+message. Cancellation, supersession, failure, and stale generations do not
+commit partial assistant output. Core permits one logical active run per
+conversation and delegates physical cancellation and generation settlement to
+`ModelRuntime`.
+
+Canonical history is composed into model input through a small
+`ConversationContextComposer` seam. The initial composer sends the complete
+provider-neutral structured role/text history. This keeps future context
+selection separate from canonical storage without adding persistence,
+compaction, memory, or provider continuation state.
+
 ## Model transport
 
 A small TypeScript/Bun sidecar is intended for model transport where it is needed. It is a transport boundary, not a second conversational runtime.

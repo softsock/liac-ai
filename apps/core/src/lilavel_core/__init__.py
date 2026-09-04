@@ -1,5 +1,21 @@
 """Importable package boundary for Lilavel Core."""
 
+from .conversation import (
+    ConversationBusy,
+    ConversationCancelled,
+    ConversationCompleted,
+    ConversationContextComposer,
+    ConversationCore,
+    ConversationError,
+    ConversationEvent,
+    ConversationFailed,
+    ConversationOutcome,
+    ConversationRun,
+    ConversationRuntime,
+    ConversationTextDelta,
+    FullHistoryContextComposer,
+    RuntimeGeneration,
+)
 from .runtime import (
     CancellationTimeout,
     EventQueueOverflow,
@@ -34,6 +50,18 @@ from .sidecar_protocol import GenerationFailed as GenerationFailedEvent
 __version__ = "0.1.0"
 
 __all__ = [
+    "ConversationBusy",
+    "ConversationCancelled",
+    "ConversationCompleted",
+    "ConversationContextComposer",
+    "ConversationCore",
+    "ConversationError",
+    "ConversationEvent",
+    "ConversationFailed",
+    "ConversationOutcome",
+    "ConversationRuntime",
+    "ConversationRun",
+    "ConversationTextDelta",
     "GenerationAccepted",
     "GenerationCancelled",
     "GenerationCompleted",
@@ -45,12 +73,14 @@ __all__ = [
     "CancellationTimeout",
     "ContextMessage",
     "EventQueueOverflow",
+    "FullHistoryContextComposer",
     "HealthEvent",
     "ModelRequest",
     "ModelRuntime",
     "ModelRuntimeError",
     "ProtocolViolation",
     "RuntimeBusy",
+    "RuntimeGeneration",
     "RuntimeHealth",
     "RuntimeNotReady",
     "RuntimeStartTimeout",

@@ -125,6 +125,34 @@ provider-specific fields. The sidecar performs the provider adapter mapping
 and retains no semantic conversation state. The legacy `prompt` form remains
 available for single-turn callers.
 
+## Semantic conversation layer
+
+`ConversationCore` owns canonical conversation history above `ModelRuntime`.
+`start_turn()` accepts the user message into history immediately and returns a
+`ConversationRun`. The run surfaces assistant deltas incrementally as a
+transient candidate; only a successful completion is appended once as a
+canonical assistant message. Cancellation, supersession, runtime failure, or
+context validation failure never commits partial assistant text.
+
+There is at most one logical active run per conversation. A new turn may
+supersede the current run; Core requests physical cancellation through
+`ModelRuntime` and waits for that runtime generation to settle before asking
+the single-generation runtime to start the new request. Late output from the
+older run is discarded and cannot enter the new run's event stream.
+
+`ConversationContextComposer` is the narrow seam between canonical history and
+model input. The initial `FullHistoryContextComposer` sends the complete
+provider-neutral `role`/`text` history as a version-one structured request.
+Provider metadata, session state, tools, and transport details remain outside
+this layer.
+
+The opt-in live Luna probe uses the existing supported authentication and
+prints only semantic results and timing observations:
+
+```powershell
+uv run --locked python scripts/conversation_live.py
+```
+
 The authoritative Core checks are run from this directory:
 
 ```powershell
