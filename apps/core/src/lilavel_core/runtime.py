@@ -433,7 +433,12 @@ class ModelRuntime:
             handle = GenerationHandle(generation_id, self._next_epoch, self._event_queue_size)
             pending = _PendingGeneration(handle, generation_id, self._next_epoch)
             try:
-                command = GenerateCommand(generation_id, self._next_epoch, request.prompt)
+                command = GenerateCommand(
+                    generation_id,
+                    self._next_epoch,
+                    prompt=request.prompt,
+                    messages=request.messages,
+                )
             except (AttributeError, TypeError) as error:
                 raise ProtocolViolation("invalid generation request") from error
             self._active = pending

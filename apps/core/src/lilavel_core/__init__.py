@@ -18,6 +18,7 @@ from .runtime import (
     SidecarCrashed,
 )
 from .sidecar_protocol import (
+    ContextMessage,
     GenerationAccepted,
     GenerationCancelled,
     GenerationCompleted,
@@ -42,6 +43,7 @@ __all__ = [
     "GenerationHandle",
     "GenerationResult",
     "CancellationTimeout",
+    "ContextMessage",
     "EventQueueOverflow",
     "HealthEvent",
     "ModelRequest",

@@ -51,6 +51,38 @@ The protocol host reserves stdout for machine-readable JSONL frames. Human
 diagnostics use stderr. The protocol contains no conversation, memory,
 character, social, voice, or tool state.
 
+## Caller-owned structured text context
+
+The version-one `generate` command supports a structured request alongside the
+legacy single `prompt` shape. Core may send a non-empty ordered array whose
+only fields are:
+
+```json
+{"role":"user","text":"Remember the word quartz."}
+{"role":"assistant","text":"ACK_1"}
+```
+
+`role` is limited to `user` or `assistant`; the aggregate UTF-8 text is
+bounded to 64 KiB. Core owns the complete context supplied for each request
+and retains only this provider-neutral role/text representation. It does not
+store provider, API, model, usage, response IDs, or provider payloads.
+
+The sidecar adapts each request to pi-ai `Context.messages`. User messages use
+their text as the pi-ai content string. Completed assistant history becomes a
+pi-ai assistant message with one text content block; the sidecar supplies the
+required local adapter fields (`api`, `provider`, `model`, zeroed placeholder
+usage, `stopReason: "stop"`, and a timestamp). It never forwards
+`providerPayload` or `responseId` for this contract. The resulting context has
+no system prompt or tool definitions. The provider adapter may still serialize
+empty provider-required scaffolding, but it adds no caller tool semantics or
+MCP behavior.
+
+The full structured context is sent on every request. The sidecar does not
+use `AgentSession`, MCP/tools, provider `sessionId`, `providerSessionState`,
+or `statefulResponses` continuation for this boundary, and it keeps
+`preferWebsockets: false`. The existing prompt form remains accepted so the
+version-one protocol stays compatible with current single-turn callers.
+
 ## Interaction invariants
 
 Streaming and cancellation are first-class interaction concerns. Changes to the runtime or model transport must preserve both.

@@ -2,11 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { ApiKeyResolver, AssistantMessage, AssistantMessageEvent, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import {
   createModelSidecar,
+  toPiAiContext,
   type AuthStorageLike,
   type SidecarEvent,
   type SidecarModel,
   type StreamSimple,
 } from "../src/index.js";
+import { type ContextMessage } from "../src/protocol.js";
 
 const model = {
   id: "gpt-5.6-luna",
@@ -49,6 +51,60 @@ afterEach(async () => {
 });
 
 describe("ModelSidecar", () => {
+  test("adapts provider-neutral context without exposing provider fields to the caller", () => {
+    const messages: ContextMessage[] = [
+      { role: "user", text: "Remember the word quartz." },
+      { role: "assistant", text: "ACK_1" },
+      { role: "user", text: "What was the word?" },
+    ];
+
+    const context = toPiAiContext(messages);
+
+    expect(context.messages).toHaveLength(3);
+    expect(context.messages[0]).toMatchObject({ role: "user", content: "Remember the word quartz." });
+    expect(context.messages[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "ACK_1" }],
+      api: "openai-codex-responses",
+      provider: "openai-codex",
+      model: "gpt-5.6-luna",
+      stopReason: "stop",
+    });
+    expect(context.messages[1]).not.toHaveProperty("providerPayload");
+    expect(context.messages[1]).not.toHaveProperty("responseId");
+    expect(context.tools).toBeUndefined();
+  });
+
+  test("sends structured context to streamSimple without provider continuation state", async () => {
+    let observedContext: Context | undefined;
+    let observedOptions: SimpleStreamOptions | undefined;
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      stream: makeStream(async function* (context, options) {
+        observedContext = context;
+        observedOptions = options;
+        yield event("text_delta", "structured");
+        yield event("done");
+      }),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate([
+      { role: "user", text: "Remember the word quartz." },
+      { role: "assistant", text: "ACK_1" },
+      { role: "user", text: "What was the word?" },
+    ]);
+    await expect(handle.result).resolves.toMatchObject({ status: "completed", text: "structured" });
+
+    expect(observedContext?.messages).toHaveLength(3);
+    expect(observedContext?.messages[2]).toMatchObject({ role: "user", content: "What was the word?" });
+    expect(observedOptions?.sessionId).toBeUndefined();
+    expect(observedOptions?.providerSessionState).toBeUndefined();
+    expect(observedOptions?.statefulResponses).toBeUndefined();
+  });
+
   test("loads and validates the exact bundled Luna model", async () => {
     const sidecar = createModelSidecar({
       auth: new FakeAuth(),

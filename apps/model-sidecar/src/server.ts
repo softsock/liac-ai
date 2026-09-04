@@ -284,7 +284,8 @@ export class ProtocolServer {
     };
     this.#active = pending;
     try {
-      const handle = this.#sidecar.generate(command.prompt, {
+      const input = "prompt" in command ? command.prompt : command.messages;
+      const handle = this.#sidecar.generate(input, {
         generationId: command.generation_id,
         epoch: command.epoch,
       });

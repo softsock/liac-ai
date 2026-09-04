@@ -146,6 +146,61 @@ test("protocol server performs ready, genuine streaming, cancellation, recovery,
   ]);
 });
 
+test("protocol server forwards structured context to the provider adapter", async () => {
+  const input = new InputQueue();
+  const output = new CaptureOutput();
+  let observedContext: Context | undefined;
+  const server = new ProtocolServer({
+    input: input.stream,
+    output,
+    createSidecar: (onEvent) =>
+      createModelSidecar({
+        auth: new FakeAuth(),
+        model,
+        stream: makeStream(async function* (context) {
+          observedContext = context;
+          yield providerEvent("text_delta", "structured");
+          yield providerEvent("done");
+        }),
+        onEvent: (event) => {
+          onEvent(event);
+          if (event.type === "completed") input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+        },
+      }),
+  });
+
+  input.push(
+    JSON.stringify({
+      protocol_version: 1,
+      type: "generate",
+      generation_id: "structured",
+      epoch: 1,
+      messages: [
+        { role: "user", text: "Remember the word quartz." },
+        { role: "assistant", text: "ACK_1" },
+        { role: "user", text: "What was the word?" },
+      ],
+    }),
+  );
+
+  expect(await server.run()).toBe(0);
+  expect(observedContext?.messages).toHaveLength(3);
+  expect(observedContext?.messages[1]).toMatchObject({
+    role: "assistant",
+    content: [{ type: "text", text: "ACK_1" }],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+  });
+  expect(output.frames().map((frame) => frame.type)).toEqual([
+    "ready",
+    "accepted",
+    "text_delta",
+    "completed",
+    "shutdown",
+  ]);
+});
+
 test("protocol server reports malformed input without hanging or corrupting stdout", async () => {
   const input = new InputQueue();
   const output = new CaptureOutput();

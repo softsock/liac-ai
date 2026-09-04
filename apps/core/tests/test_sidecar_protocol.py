@@ -5,9 +5,11 @@ import json
 import pytest
 
 from lilavel_core.sidecar_protocol import (
+    MAX_CONTEXT_BYTES,
     MAX_FRAME_BYTES,
     MAX_PROMPT_BYTES,
     CancelCommand,
+    ContextMessage,
     GenerateCommand,
     GenerationAccepted,
     GenerationCancelled,
@@ -39,6 +41,49 @@ def test_command_round_trip_keeps_small_request_shape() -> None:
         "epoch": 7,
         "prompt": "Reply exactly OK.",
     }
+
+
+def test_structured_context_round_trip_contains_only_role_and_text() -> None:
+    messages = (
+        ContextMessage("user", "Remember the word quartz."),
+        ContextMessage("assistant", "ACK_1"),
+        ContextMessage("user", "What was the word?"),
+    )
+    command = GenerateCommand("generation-structured", 8, messages=messages)
+
+    assert parse_command(encode_command(command)) == command
+    assert json.loads(encode_command(command)) == {
+        "protocol_version": 1,
+        "type": "generate",
+        "generation_id": "generation-structured",
+        "epoch": 8,
+        "messages": [
+            {"role": "user", "text": "Remember the word quartz."},
+            {"role": "assistant", "text": "ACK_1"},
+            {"role": "user", "text": "What was the word?"},
+        ],
+    }
+
+
+def test_structured_context_rejects_unsupported_roles_and_unbounded_context() -> None:
+    with pytest.raises(ProtocolError):
+        parse_command(
+            b'{"protocol_version":1,"type":"generate","generation_id":"x","epoch":1,'
+            b'"messages":[{"role":"developer","text":"not supported"}]}\n'
+        )
+
+    with pytest.raises(ProtocolError):
+        ModelRequest(messages=(ContextMessage("user", "x" * (MAX_CONTEXT_BYTES + 1)),))
+
+    with pytest.raises(ProtocolError):
+        ModelRequest(messages=())
+
+
+def test_structured_context_cannot_mix_legacy_prompt() -> None:
+    with pytest.raises(ProtocolError):
+        GenerateCommand(
+            "generation-1", 1, prompt="prompt", messages=(ContextMessage("user", "text"),)
+        )
 
 
 def test_all_event_variants_serialize_and_parse() -> None:

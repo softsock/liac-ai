@@ -9,6 +9,7 @@ from typing import Final, Literal, cast
 PROTOCOL_VERSION: Final = 1
 MAX_FRAME_BYTES: Final = 256 * 1024
 MAX_PROMPT_BYTES: Final = 64 * 1024
+MAX_CONTEXT_BYTES: Final = MAX_PROMPT_BYTES
 MAX_DELTA_BYTES: Final = 16 * 1024
 MAX_RESPONSE_BYTES: Final = 256 * 1024
 MAX_ID_BYTES: Final = 128
@@ -42,6 +43,7 @@ type RuntimeState = Literal[
 ]
 type HealthState = Literal["starting", "ready", "busy", "failed", "closed"]
 type GenerationStatus = Literal["completed", "cancelled"]
+type ContextRole = Literal["user", "assistant"]
 
 
 class ProtocolError(ValueError):
@@ -53,20 +55,57 @@ class ProtocolError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class ModelRequest:
-    """The intentionally small Core-owned request sent to the model boundary."""
+class ContextMessage:
+    """Provider-neutral text in caller-owned context order."""
 
-    prompt: str
+    role: ContextRole
+    text: str
 
     def __post_init__(self) -> None:
-        _bounded_string(self.prompt, MAX_PROMPT_BYTES, "prompt")
+        if self.role not in {"user", "assistant"}:
+            raise ProtocolError("invalid_field")
+        _bounded_string(self.text, MAX_PROMPT_BYTES, "text")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequest:
+    """The intentionally small Core-owned request sent to the model boundary.
+
+    ``prompt`` keeps the existing single-turn request shape. ``messages`` is
+    the structured extension: an immutable, ordered sequence of only user or
+    assistant text. The sidecar owns adaptation to any provider message type.
+    """
+
+    prompt: str | None = None
+    messages: tuple[ContextMessage, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.prompt is None) == (self.messages is None):
+            raise ProtocolError("invalid_field")
+        if self.prompt is not None:
+            _bounded_string(self.prompt, MAX_PROMPT_BYTES, "prompt")
+        else:
+            assert self.messages is not None
+            object.__setattr__(self, "messages", tuple(self.messages))
+            _validate_context_messages(self.messages)
 
 
 @dataclass(frozen=True, slots=True)
 class GenerateCommand:
     generation_id: str
     epoch: int
-    prompt: str
+    prompt: str | None = None
+    messages: tuple[ContextMessage, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.prompt is None) == (self.messages is None):
+            raise ProtocolError("invalid_field")
+        if self.prompt is not None:
+            _bounded_string(self.prompt, MAX_PROMPT_BYTES, "prompt")
+        else:
+            assert self.messages is not None
+            object.__setattr__(self, "messages", tuple(self.messages))
+            _validate_context_messages(self.messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,14 +192,17 @@ def encode_command(command: ProtocolCommand) -> bytes:
     if isinstance(command, GenerateCommand):
         _id(command.generation_id)
         _epoch(command.epoch)
-        _bounded_string(command.prompt, MAX_PROMPT_BYTES, "prompt")
         value: dict[str, object] = {
             "protocol_version": PROTOCOL_VERSION,
             "type": "generate",
             "generation_id": command.generation_id,
             "epoch": command.epoch,
-            "prompt": command.prompt,
         }
+        if command.prompt is not None:
+            value["prompt"] = _bounded_string(command.prompt, MAX_PROMPT_BYTES, "prompt")
+        else:
+            assert command.messages is not None
+            value["messages"] = _encode_context_messages(command.messages)
     elif isinstance(command, CancelCommand):
         _id(command.generation_id)
         _epoch(command.epoch)
@@ -282,12 +324,22 @@ def parse_command(payload: bytes | str) -> ProtocolCommand:
     if not isinstance(command_type, str):
         raise ProtocolError("invalid_field")
     if command_type == "generate":
-        _expect_keys(value, "protocol_version", "type", "generation_id", "epoch", "prompt")
-        return GenerateCommand(
-            _id(value["generation_id"]),
-            _epoch(value["epoch"]),
-            _bounded_string(value["prompt"], MAX_PROMPT_BYTES, "prompt"),
-        )
+        _require_keys(value, "generation_id", "epoch")
+        generation_id = _id(value["generation_id"])
+        epoch = _epoch(value["epoch"])
+        if "prompt" in value and "messages" not in value:
+            _expect_keys(value, "protocol_version", "type", "generation_id", "epoch", "prompt")
+            return GenerateCommand(
+                generation_id,
+                epoch,
+                prompt=_bounded_string(value["prompt"], MAX_PROMPT_BYTES, "prompt"),
+            )
+        if "messages" in value and "prompt" not in value:
+            _expect_keys(value, "protocol_version", "type", "generation_id", "epoch", "messages")
+            return GenerateCommand(
+                generation_id, epoch, messages=_parse_context_messages(value["messages"])
+            )
+        raise ProtocolError("unknown_field")
     if command_type == "cancel":
         _expect_keys(value, "protocol_version", "type", "generation_id", "epoch")
         return CancelCommand(_id(value["generation_id"]), _epoch(value["epoch"]))
@@ -309,6 +361,44 @@ def _generation_value(event_type: str, generation_id: str, epoch: int) -> dict[s
         "generation_id": generation_id,
         "epoch": epoch,
     }
+
+
+def _validate_context_messages(messages: tuple[ContextMessage, ...]) -> None:
+    if not messages:
+        raise ProtocolError("invalid_field")
+    total_bytes = 0
+    for message in messages:
+        total_bytes += len(message.text.encode("utf-8"))
+    if total_bytes > MAX_CONTEXT_BYTES:
+        raise ProtocolError("invalid_field")
+
+
+def _encode_context_messages(messages: tuple[ContextMessage, ...]) -> list[dict[str, str]]:
+    _validate_context_messages(messages)
+    return [{"role": message.role, "text": message.text} for message in messages]
+
+
+def _parse_context_messages(value: object) -> tuple[ContextMessage, ...]:
+    if not isinstance(value, list):
+        raise ProtocolError("invalid_field")
+    messages: list[ContextMessage] = []
+    for raw_item in cast(list[object], value):
+        if not isinstance(raw_item, dict):
+            raise ProtocolError("invalid_field")
+        item = cast(dict[str, object], raw_item)
+        _expect_keys(item, "role", "text")
+        role = item["role"]
+        if role not in {"user", "assistant"}:
+            raise ProtocolError("invalid_field")
+        messages.append(
+            ContextMessage(
+                cast(ContextRole, role),
+                _bounded_string(item["text"], MAX_PROMPT_BYTES, "text"),
+            )
+        )
+    parsed = tuple(messages)
+    _validate_context_messages(parsed)
+    return parsed
 
 
 def _parse_object(payload: bytes | str) -> dict[str, object]:

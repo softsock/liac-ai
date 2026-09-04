@@ -103,6 +103,28 @@ accumulated Core response at 256 KiB, each frame at 256 KiB, and each ID at
 mismatched identities, malformed frames, and invalid lifecycle transitions
 fail closed.
 
+## Structured caller-owned context
+
+`ModelRequest` also accepts a non-empty ordered tuple of `ContextMessage`
+values. Each value contains only `role` (`"user"` or `"assistant"`) and
+`text`; aggregate UTF-8 text is bounded to 64 KiB. For example:
+
+```python
+ModelRequest(
+    messages=(
+        ContextMessage("user", "Remember the word quartz."),
+        ContextMessage("assistant", "ACK_1"),
+        ContextMessage("user", "What was the word?"),
+    )
+)
+```
+
+Core sends this as the version-one `generate.messages` array. The complete
+caller-owned context is sent on every request; Core does not persist pi-ai or
+provider-specific fields. The sidecar performs the provider adapter mapping
+and retains no semantic conversation state. The legacy `prompt` form remains
+available for single-turn callers.
+
 The authoritative Core checks are run from this directory:
 
 ```powershell

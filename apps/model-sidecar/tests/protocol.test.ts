@@ -39,9 +39,49 @@ describe("sidecar protocol", () => {
     ).toMatchObject({ type: "failed", code: "cleanup_timeout" });
   });
 
+  test("round-trips caller-owned structured context with only role and text", () => {
+    const command: ProtocolCommand = {
+      protocol_version: 1,
+      type: "generate",
+      generation_id: "generation-structured",
+      epoch: 4,
+      messages: [
+        { role: "user", text: "Remember the word quartz." },
+        { role: "assistant", text: "ACK_1" },
+        { role: "user", text: "What was the word?" },
+      ],
+    };
+
+    expect(parseCommand(encodeCommand(command).trim())).toEqual(command);
+    expect(JSON.parse(encodeCommand(command))).toEqual(command);
+  });
+
   test("rejects unknown fields, invalid versions, and oversized values", () => {
     expect(() => parseCommand('{"protocol_version":1,"type":"health","extra":true}')).toThrow();
     expect(() => parseCommand('{"protocol_version":2,"type":"health"}')).toThrow();
+    expect(() =>
+      parseCommand(
+        JSON.stringify({
+          protocol_version: 1,
+          type: "generate",
+          generation_id: "generation-1",
+          epoch: 1,
+          messages: [{ role: "developer", text: "not supported" }],
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseCommand(
+        JSON.stringify({
+          protocol_version: 1,
+          type: "generate",
+          generation_id: "generation-1",
+          epoch: 1,
+          prompt: "legacy",
+          messages: [{ role: "user", text: "ambiguous" }],
+        }),
+      ),
+    ).toThrow();
     expect(() =>
       parseCommand(
         JSON.stringify({

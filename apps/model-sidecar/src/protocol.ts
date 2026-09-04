@@ -5,6 +5,7 @@ export const PROTOCOL_VERSION = 1 as const;
 export const PROTOCOL_LIMITS = {
   maxFrameBytes: 256 * 1024,
   maxPromptBytes: 64 * 1024,
+  maxContextBytes: 64 * 1024,
   maxDeltaBytes: 16 * 1024,
   maxResponseBytes: 256 * 1024,
   maxIdBytes: 128,
@@ -28,13 +29,30 @@ export type ProtocolErrorCode =
 
 export type ProtocolCommand = GenerateCommand | CancelCommand | HealthCommand | ShutdownCommand;
 
-export interface GenerateCommand {
+export type ContextRole = "user" | "assistant";
+
+export interface ContextMessage {
+  role: ContextRole;
+  text: string;
+}
+
+export interface GeneratePromptCommand {
   protocol_version: typeof PROTOCOL_VERSION;
   type: "generate";
   generation_id: string;
   epoch: number;
   prompt: string;
 }
+
+export interface GenerateContextCommand {
+  protocol_version: typeof PROTOCOL_VERSION;
+  type: "generate";
+  generation_id: string;
+  epoch: number;
+  messages: ContextMessage[];
+}
+
+export type GenerateCommand = GeneratePromptCommand | GenerateContextCommand;
 
 export interface CancelCommand {
   protocol_version: typeof PROTOCOL_VERSION;
@@ -188,10 +206,27 @@ export function validateEpoch(value: number): void {
   assertEpoch(value);
 }
 
+export function validateContextMessages(value: readonly ContextMessage[]): void {
+  assertContextMessages(value);
+}
+
 function assertBoundedString(value: unknown, maxBytes: number): asserts value is string {
   if (typeof value !== "string" || encoder.encode(value).length > maxBytes) {
     throw new ProtocolError("invalid_field");
   }
+}
+
+function assertContextMessages(value: unknown): asserts value is ContextMessage[] {
+  if (!Array.isArray(value) || value.length === 0) throw new ProtocolError("invalid_field");
+  let totalBytes = 0;
+  for (const item of value) {
+    if (!isRecord(item)) throw new ProtocolError("invalid_field");
+    assertExactKeys(item, ["role", "text"]);
+    if (item.role !== "user" && item.role !== "assistant") throw new ProtocolError("invalid_field");
+    assertBoundedString(item.text, PROTOCOL_LIMITS.maxPromptBytes);
+    totalBytes += new TextEncoder().encode(item.text).length;
+  }
+  if (totalBytes > PROTOCOL_LIMITS.maxContextBytes) throw new ProtocolError("invalid_field");
 }
 
 function assertErrorCode(value: unknown): asserts value is ProtocolErrorCode {
@@ -233,11 +268,19 @@ export function parseCommand(line: string): ProtocolCommand {
   assertVersion(value);
 
   if (value.type === "generate") {
-    assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "prompt"]);
     assertId(value.generation_id);
     assertEpoch(value.epoch);
-    assertBoundedString(value.prompt, PROTOCOL_LIMITS.maxPromptBytes);
-    return value as unknown as GenerateCommand;
+    if ("prompt" in value && !("messages" in value)) {
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "prompt"]);
+      assertBoundedString(value.prompt, PROTOCOL_LIMITS.maxPromptBytes);
+      return value as unknown as GeneratePromptCommand;
+    }
+    if ("messages" in value && !("prompt" in value)) {
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "messages"]);
+      assertContextMessages(value.messages);
+      return value as unknown as GenerateContextCommand;
+    }
+    throw new ProtocolError("unknown_field");
   }
   if (value.type === "cancel") {
     assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch"]);
@@ -319,6 +362,9 @@ export function encodeFrame(frame: ProtocolCommand | ProtocolEvent): string {
 }
 
 export function encodeCommand(command: ProtocolCommand): string {
+  if (command.type === "generate" && "messages" in command) {
+    validateContextMessages(command.messages);
+  }
   parseCommand(JSON.stringify(command));
   return encodeFrame(command);
 }

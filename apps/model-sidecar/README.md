@@ -10,7 +10,9 @@ conversation history.
 ## Importable API
 
 Create the sidecar with `createModelSidecar()`, call `start()` once, and then
-call `generate(prompt)` for one request at a time. `start()` loads local auth
+call `generate(prompt)` or `generate(messages)` for one request at a time.
+Structured `messages` contain only ordered `{role, text}` values where
+`role` is `user` or `assistant`. `start()` loads local auth
 and the pinned model before emitting `ready`. That event, and the `state`
 property, describe local sidecar/model readiness; they do not prove provider
 endpoint availability, quota, or live entitlement.
@@ -40,6 +42,7 @@ diagnostics belong on stderr. The supported commands are:
 
 ```json
 {"protocol_version":1,"type":"generate","generation_id":"uuid","epoch":1,"prompt":"Reply exactly OK."}
+{"protocol_version":1,"type":"generate","generation_id":"uuid","epoch":2,"messages":[{"role":"user","text":"Remember the word quartz."},{"role":"assistant","text":"ACK_1"},{"role":"user","text":"What was the word?"}]}
 {"protocol_version":1,"type":"cancel","generation_id":"uuid","epoch":1}
 {"protocol_version":1,"type":"health"}
 {"protocol_version":1,"type":"shutdown"}
@@ -68,11 +71,16 @@ only after the sidecar closes successfully. `cleanup_timeout` and
 `cleanup_error` are fatal even if an earlier terminal frame was already
 observed; they never produce a second generation terminal frame.
 
-The version-one protocol enforces a 256 KiB frame, 64 KiB prompt, 16 KiB
-delta, 256 KiB response, and 128-byte identity bounds. Invalid framing or
-fields are rejected by the parser; Core fails closed on future or mismatched
-generation identities. Core owns the generation lifecycle and semantic state;
-this host owns provider and process transport state only.
+The version-one protocol enforces a 256 KiB frame, 64 KiB prompt or aggregate
+structured-context text, 16 KiB delta, 256 KiB response, and 128-byte identity
+bounds. Invalid framing or fields are rejected by the parser; Core fails
+closed on future or mismatched generation identities. For structured context,
+the host maps user text to pi-ai `UserMessage` and completed assistant text to
+a typed pi-ai `AssistantMessage` with local adapter metadata. It does not
+forward provider payloads, response IDs, usage, `sessionId`, or
+`providerSessionState`, and does not retain semantic history. Core owns the
+generation lifecycle and semantic state; this host owns provider and process
+transport state only.
 
 When Core launches the host on Windows, it starts the default `npx` launcher
 suspended, verifies Job Object containment, and resumes it only after the

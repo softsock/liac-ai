@@ -7,10 +7,16 @@ import {
   type Message,
   type Model,
   type SimpleStreamOptions,
+  type Usage,
 } from "@oh-my-pi/pi-ai";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker";
 import { getBundledModel } from "@oh-my-pi/pi-catalog";
-import { validateEpoch, validateGenerationId } from "./protocol.js";
+import {
+  validateContextMessages,
+  validateEpoch,
+  validateGenerationId,
+  type ContextMessage,
+} from "./protocol.js";
 
 const PROVIDER = "openai-codex";
 const MODEL_ID = "gpt-5.6-luna";
@@ -33,6 +39,8 @@ export type StreamSimple = (
   context: Context,
   options?: SimpleStreamOptions,
 ) => AsyncIterable<AssistantMessageEvent>;
+
+export type ModelInput = string | readonly ContextMessage[];
 
 export interface LatencyMarks {
   requestReceived?: number;
@@ -170,6 +178,44 @@ function defaultStream(
   return streamSimple(model, context, options);
 }
 
+function emptyUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+/**
+ * Adapt Lilavel's provider-neutral text context to pi-ai's typed history.
+ * Required assistant fields are local adapter metadata; caller-owned context
+ * never carries provider payloads, response IDs, usage, or session state.
+ */
+export function toPiAiContext(messages: readonly ContextMessage[]): Context {
+  validateContextMessages(messages);
+  const timestamp = Date.now();
+  const mapped: Message[] = messages.map((message, index) => {
+    const messageTimestamp = timestamp + index;
+    if (message.role === "user") {
+      return { role: "user", content: message.text, timestamp: messageTimestamp };
+    }
+    return {
+      role: "assistant",
+      content: [{ type: "text", text: message.text }],
+      api: API,
+      provider: PROVIDER,
+      model: MODEL_ID,
+      usage: emptyUsage(),
+      stopReason: "stop",
+      timestamp: messageTimestamp,
+    };
+  });
+  return { messages: mapped };
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof SidecarError && error.code === "cancelled";
 }
@@ -225,12 +271,22 @@ export class ModelSidecar {
     return this.#startPromise;
   }
 
-  generate(prompt: string, identity?: GenerationIdentity): GenerationHandle {
+  generate(input: ModelInput, identity?: GenerationIdentity): GenerationHandle {
     const requestId = identity?.generationId ?? this.#createRequestId();
     const epoch = identity?.epoch ?? 1;
     try {
       validateGenerationId(requestId);
       validateEpoch(epoch);
+    } catch {
+      return this.#rejectedHandle(requestId, epoch, "invalid_request");
+    }
+    let request: ModelInput;
+    try {
+      if (typeof input === "string") request = input;
+      else {
+        validateContextMessages(input);
+        request = input.map((message) => ({ role: message.role, text: message.text }));
+      }
     } catch {
       return this.#rejectedHandle(requestId, epoch, "invalid_request");
     }
@@ -260,7 +316,7 @@ export class ModelSidecar {
     // Install the active record before notifying observers. This makes a
     // cancel issued from an accepted/request callback deterministic too.
     this.#emit("request_received", diagnostics, {});
-    void this.#runRequest(prompt, model, auth, controller, diagnostics).then(resolveResult, rejectResult);
+    void this.#runRequest(request, model, auth, controller, diagnostics).then(resolveResult, rejectResult);
     const cleanup = () => {
       if (this.#active?.requestId === requestId) this.#active = undefined;
       if (!this.#closed && !this.#poisoned) this.#state = "ready";
@@ -317,7 +373,7 @@ export class ModelSidecar {
   }
 
   async #runRequest(
-    prompt: string,
+    input: ModelInput,
     model: SidecarModel,
     auth: AuthStorageLike,
     controller: AbortController,
@@ -329,8 +385,10 @@ export class ModelSidecar {
     let result: GenerationResult | undefined;
     let failure: SidecarError | undefined;
     try {
-      const message: Message = { role: "user", content: prompt, timestamp: Date.now() };
-      const context: Context = { messages: [message] };
+      const context: Context =
+        typeof input === "string"
+          ? { messages: [{ role: "user", content: input, timestamp: Date.now() }] }
+          : toPiAiContext(input);
       const apiKey: ApiKeyResolver = auth.resolver(PROVIDER, {
         sessionId: diagnostics.requestId,
         modelId: model.id,
