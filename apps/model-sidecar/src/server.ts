@@ -284,7 +284,11 @@ export class ProtocolServer {
     };
     this.#active = pending;
     try {
-      const input = "prompt" in command ? command.prompt : command.messages;
+      const input = "prompt" in command
+        ? command.system_prompt?.length
+          ? { messages: [{ role: "user" as const, text: command.prompt }], system_prompt: command.system_prompt }
+          : command.prompt
+        : { messages: command.messages, system_prompt: command.system_prompt };
       const handle = this.#sidecar.generate(input, {
         generationId: command.generation_id,
         epoch: command.epoch,

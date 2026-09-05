@@ -13,6 +13,7 @@ MAX_CONTEXT_BYTES: Final = MAX_PROMPT_BYTES
 MAX_DELTA_BYTES: Final = 16 * 1024
 MAX_RESPONSE_BYTES: Final = 256 * 1024
 MAX_ID_BYTES: Final = 128
+MAX_GUIDANCE_BYTES: Final = 16 * 1024
 MAX_EPOCH: Final = 2**53 - 1
 
 type ProtocolErrorCode = Literal[
@@ -78,6 +79,7 @@ class ModelRequest:
 
     prompt: str | None = None
     messages: tuple[ContextMessage, ...] | None = None
+    system_prompt: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.prompt is None) == (self.messages is None):
@@ -88,6 +90,12 @@ class ModelRequest:
             assert self.messages is not None
             object.__setattr__(self, "messages", tuple(self.messages))
             _validate_context_messages(self.messages)
+        object.__setattr__(self, "system_prompt", tuple(self.system_prompt))
+        total = 0
+        for block in self.system_prompt:
+            total += len(_bounded_string(block, MAX_PROMPT_BYTES, "system_prompt").encode("utf-8"))
+        if total > MAX_GUIDANCE_BYTES:
+            raise ProtocolError("invalid_field")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +104,7 @@ class GenerateCommand:
     epoch: int
     prompt: str | None = None
     messages: tuple[ContextMessage, ...] | None = None
+    system_prompt: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.prompt is None) == (self.messages is None):
@@ -106,6 +115,15 @@ class GenerateCommand:
             assert self.messages is not None
             object.__setattr__(self, "messages", tuple(self.messages))
             _validate_context_messages(self.messages)
+        object.__setattr__(self, "system_prompt", tuple(self.system_prompt))
+        if (
+            sum(
+                len(_bounded_string(x, MAX_PROMPT_BYTES, "system_prompt").encode("utf-8"))
+                for x in self.system_prompt
+            )
+            > MAX_GUIDANCE_BYTES
+        ):
+            raise ProtocolError("invalid_field")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +221,8 @@ def encode_command(command: ProtocolCommand) -> bytes:
         else:
             assert command.messages is not None
             value["messages"] = _encode_context_messages(command.messages)
+        if command.system_prompt:
+            value["system_prompt"] = list(command.system_prompt)
     elif isinstance(command, CancelCommand):
         _id(command.generation_id)
         _epoch(command.epoch)
@@ -328,16 +348,40 @@ def parse_command(payload: bytes | str) -> ProtocolCommand:
         generation_id = _id(value["generation_id"])
         epoch = _epoch(value["epoch"])
         if "prompt" in value and "messages" not in value:
-            _expect_keys(value, "protocol_version", "type", "generation_id", "epoch", "prompt")
+            _expect_keys(
+                value,
+                "protocol_version",
+                "type",
+                "generation_id",
+                "epoch",
+                "prompt",
+                "system_prompt",
+            ) if "system_prompt" in value else _expect_keys(
+                value, "protocol_version", "type", "generation_id", "epoch", "prompt"
+            )
             return GenerateCommand(
                 generation_id,
                 epoch,
                 prompt=_bounded_string(value["prompt"], MAX_PROMPT_BYTES, "prompt"),
+                system_prompt=_parse_guidance(value.get("system_prompt", [])),
             )
         if "messages" in value and "prompt" not in value:
-            _expect_keys(value, "protocol_version", "type", "generation_id", "epoch", "messages")
+            _expect_keys(
+                value,
+                "protocol_version",
+                "type",
+                "generation_id",
+                "epoch",
+                "messages",
+                "system_prompt",
+            ) if "system_prompt" in value else _expect_keys(
+                value, "protocol_version", "type", "generation_id", "epoch", "messages"
+            )
             return GenerateCommand(
-                generation_id, epoch, messages=_parse_context_messages(value["messages"])
+                generation_id,
+                epoch,
+                messages=_parse_context_messages(value["messages"]),
+                system_prompt=_parse_guidance(value.get("system_prompt", [])),
             )
         raise ProtocolError("unknown_field")
     if command_type == "cancel":
@@ -399,6 +443,19 @@ def _parse_context_messages(value: object) -> tuple[ContextMessage, ...]:
     parsed = tuple(messages)
     _validate_context_messages(parsed)
     return parsed
+
+
+def _parse_guidance(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ProtocolError("invalid_field")
+    raw = cast(list[object], value)
+    if any(not isinstance(item, str) for item in raw):
+        raise ProtocolError("invalid_field")
+    strings = cast(list[str], raw)
+    result = tuple(_bounded_string(x, MAX_PROMPT_BYTES, "system_prompt") for x in strings)
+    if sum(len(x.encode("utf-8")) for x in result) > MAX_GUIDANCE_BYTES:
+        raise ProtocolError("invalid_field")
+    return result
 
 
 def _parse_object(payload: bytes | str) -> dict[str, object]:

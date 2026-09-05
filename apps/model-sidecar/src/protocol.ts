@@ -9,6 +9,7 @@ export const PROTOCOL_LIMITS = {
   maxDeltaBytes: 16 * 1024,
   maxResponseBytes: 256 * 1024,
   maxIdBytes: 128,
+  maxGuidanceBytes: 16 * 1024,
 } as const;
 
 export type ProtocolErrorCode =
@@ -42,6 +43,7 @@ export interface GeneratePromptCommand {
   generation_id: string;
   epoch: number;
   prompt: string;
+  system_prompt?: string[];
 }
 
 export interface GenerateContextCommand {
@@ -50,6 +52,7 @@ export interface GenerateContextCommand {
   generation_id: string;
   epoch: number;
   messages: ContextMessage[];
+  system_prompt?: string[];
 }
 
 export type GenerateCommand = GeneratePromptCommand | GenerateContextCommand;
@@ -229,6 +232,16 @@ function assertContextMessages(value: unknown): asserts value is ContextMessage[
   if (totalBytes > PROTOCOL_LIMITS.maxContextBytes) throw new ProtocolError("invalid_field");
 }
 
+export function validateSystemPrompt(value: readonly string[]): void {
+  if (!Array.isArray(value)) throw new ProtocolError("invalid_field");
+  let total = 0;
+  for (const block of value) {
+    if (typeof block !== "string" || new TextEncoder().encode(block).byteLength > PROTOCOL_LIMITS.maxPromptBytes) throw new ProtocolError("invalid_field");
+    total += new TextEncoder().encode(block).byteLength;
+  }
+  if (total > PROTOCOL_LIMITS.maxGuidanceBytes) throw new ProtocolError("invalid_field");
+}
+
 function assertErrorCode(value: unknown): asserts value is ProtocolErrorCode {
   if (
     value !== "busy" &&
@@ -271,13 +284,15 @@ export function parseCommand(line: string): ProtocolCommand {
     assertId(value.generation_id);
     assertEpoch(value.epoch);
     if ("prompt" in value && !("messages" in value)) {
-      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "prompt"]);
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "prompt", ...( "system_prompt" in value ? ["system_prompt"] : [])]);
       assertBoundedString(value.prompt, PROTOCOL_LIMITS.maxPromptBytes);
+      if ("system_prompt" in value) validateSystemPrompt(value.system_prompt as string[]);
       return value as unknown as GeneratePromptCommand;
     }
     if ("messages" in value && !("prompt" in value)) {
-      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "messages"]);
+      assertExactKeys(value, ["protocol_version", "type", "generation_id", "epoch", "messages", ...( "system_prompt" in value ? ["system_prompt"] : [])]);
       assertContextMessages(value.messages);
+      if ("system_prompt" in value) validateSystemPrompt(value.system_prompt as string[]);
       return value as unknown as GenerateContextCommand;
     }
     throw new ProtocolError("unknown_field");

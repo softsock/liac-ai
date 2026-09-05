@@ -16,6 +16,7 @@ import {
   validateEpoch,
   validateGenerationId,
   type ContextMessage,
+  validateSystemPrompt,
 } from "./protocol.js";
 
 const PROVIDER = "openai-codex";
@@ -40,7 +41,10 @@ export type StreamSimple = (
   options?: SimpleStreamOptions,
 ) => AsyncIterable<AssistantMessageEvent>;
 
-export type ModelInput = string | readonly ContextMessage[];
+export type ModelInput = string | readonly ContextMessage[] | { messages: readonly ContextMessage[]; system_prompt?: readonly string[] };
+function isStructuredInput(input: ModelInput): input is { messages: readonly ContextMessage[]; system_prompt?: readonly string[] } {
+  return typeof input !== "string" && !Array.isArray(input) && "messages" in input;
+}
 
 export interface LatencyMarks {
   requestReceived?: number;
@@ -280,12 +284,16 @@ export class ModelSidecar {
     } catch {
       return this.#rejectedHandle(requestId, epoch, "invalid_request");
     }
-    let request: ModelInput;
+    let request: ModelInput = input;
     try {
       if (typeof input === "string") request = input;
-      else {
+      else if (Array.isArray(input)) {
         validateContextMessages(input);
-        request = input.map((message) => ({ role: message.role, text: message.text }));
+        request = input;
+      } else if (isStructuredInput(input)) {
+        validateContextMessages(input.messages);
+        if (input.system_prompt) validateSystemPrompt(input.system_prompt);
+        request = { messages: input.messages.map((message) => ({ role: message.role, text: message.text })), system_prompt: input.system_prompt };
       }
     } catch {
       return this.#rejectedHandle(requestId, epoch, "invalid_request");
@@ -388,7 +396,8 @@ export class ModelSidecar {
       const context: Context =
         typeof input === "string"
           ? { messages: [{ role: "user", content: input, timestamp: Date.now() }] }
-          : toPiAiContext(input);
+          : toPiAiContext(isStructuredInput(input) ? input.messages : input);
+      if (isStructuredInput(input) && input.system_prompt?.length) context.systemPrompt = [...input.system_prompt];
       const apiKey: ApiKeyResolver = auth.resolver(PROVIDER, {
         sessionId: diagnostics.requestId,
         modelId: model.id,

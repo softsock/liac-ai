@@ -386,9 +386,11 @@ class ConversationCore:
         runtime: ConversationRuntime,
         *,
         composer: ConversationContextComposer | None = None,
+        trusted_guidance: Sequence[str] = (),
     ) -> None:
         self._runtime = runtime
         self._composer = composer or FullHistoryContextComposer()
+        self._trusted_guidance = tuple(trusted_guidance)
         self._lock = RLock()
         self._history: list[ContextMessage] = []
         self._active: ConversationRun | None = None
@@ -438,7 +440,7 @@ class ConversationCore:
         with self._lock:
             history = tuple(self._history)
         composed = tuple(self._composer.compose(history))
-        return ModelRequest(messages=composed)
+        return ModelRequest(messages=composed, system_prompt=self._trusted_guidance)
 
     def publish_delta(self, run: ConversationRun, delta: str) -> None:
         with self._lock:

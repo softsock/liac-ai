@@ -1,5 +1,6 @@
 """Importable package boundary for Lilavel Core."""
 
+from .cognition import IdentityCanon, ResponseDisposition, WorkingState, compile_guidance
 from .conversation import (
     ConversationBusy,
     ConversationCancelled,
@@ -91,4 +92,8 @@ __all__ = [
     "ShutdownEvent",
     "TextDelta",
     "__version__",
+    "IdentityCanon",
+    "WorkingState",
+    "ResponseDisposition",
+    "compile_guidance",
 ]

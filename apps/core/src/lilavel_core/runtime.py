@@ -438,6 +438,7 @@ class ModelRuntime:
                     self._next_epoch,
                     prompt=request.prompt,
                     messages=request.messages,
+                    system_prompt=request.system_prompt,
                 )
             except (AttributeError, TypeError) as error:
                 raise ProtocolViolation("invalid generation request") from error
