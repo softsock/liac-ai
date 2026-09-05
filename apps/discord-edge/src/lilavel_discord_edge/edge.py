@@ -73,11 +73,17 @@ def read_edit_interval_from_environment(environ: Mapping[str, str] | None = None
 def read_semantic_streaming_from_environment(
     environ: Mapping[str, str] | None = None,
 ) -> bool:
-    """Read the opt-in semantic presentation experiment switch."""
+    """Read the default-on semantic presentation switch.
+
+    The explicit ``0`` value is the rollback/diagnostic seam; an absent
+    variable keeps the normal edge behavior enabled.
+    """
 
     source = os.environ if environ is None else environ
     raw_value = source.get(SEMANTIC_STREAMING_ENV)
-    if raw_value is None or raw_value.strip() == "0":
+    if raw_value is None:
+        return True
+    if raw_value.strip() == "0":
         return False
     if raw_value.strip() == "1":
         return True
@@ -190,7 +196,7 @@ class DiscordTextEdge:
         close_timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S,
         clock: Callable[[], float] = time.perf_counter,
         diagnostics: DiscordDiagnostics | None = None,
-        semantic_streaming: bool = False,
+        semantic_streaming: bool = True,
         semantic_lookahead_s: float = DEFAULT_SEMANTIC_LOOKAHEAD_S,
         semantic_max_tail_chars: int = DEFAULT_SEMANTIC_MAX_TAIL_CHARS,
     ) -> None:

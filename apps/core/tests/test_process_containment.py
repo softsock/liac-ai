@@ -32,6 +32,15 @@ FIXTURE = Path(__file__).parent / "fixtures" / "windows_npx_sidecar.ts"
 REPO_ROOT = FIXTURE.parents[4]
 
 
+def test_process_creation_flags_preserve_containment_and_isolate_console_interrupts() -> None:
+    flags = process_creation_flags()
+    if os.name == "nt":
+        assert flags & 0x00000004  # CREATE_SUSPENDED
+        assert flags & 0x00000200  # CREATE_NEW_PROCESS_GROUP
+    else:
+        assert flags == 0
+
+
 def _processes_with_marker(marker: str) -> list[dict[str, Any]]:
     """Return only launcher descendants; exclude this query's PowerShell shim."""
 

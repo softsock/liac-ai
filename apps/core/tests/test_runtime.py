@@ -105,6 +105,20 @@ def test_malformed_sidecar_output_fails_closed() -> None:
     assert model.health().state == "failed"
 
 
+def test_truncated_shutdown_frame_is_rejected_at_eof() -> None:
+    """A partial frame during teardown remains a protocol failure."""
+
+    model = runtime("shutdown-truncated")
+    model.start()
+
+    with pytest.raises(ProtocolViolation, match="invalid sidecar protocol: malformed"):
+        model.shutdown()
+
+    assert model.health().state == "failed"
+    # Failed runtimes retain an idempotent, non-raising cleanup path.
+    model.shutdown()
+
+
 def test_startup_readiness_is_bounded() -> None:
     model = runtime("no-ready", startup_timeout=0.1)
 

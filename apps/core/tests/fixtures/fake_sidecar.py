@@ -195,6 +195,10 @@ def main() -> int:
                 os._exit(3)
             if mode == "shutdown-no-ack":
                 return 0
+            if mode == "shutdown-truncated":
+                sys.stdout.write('{"protocol_version":1,"type":"shutdown"')
+                sys.stdout.flush()
+                return 0
             emit({"protocol_version": 1, "type": "shutdown"})
             return 0
     return 0

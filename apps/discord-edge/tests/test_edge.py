@@ -230,13 +230,37 @@ def test_edit_pacing_override_accepts_controlled_experiment_values() -> None:
         read_edit_interval_from_environment({EDIT_INTERVAL_ENV: "nan"})
 
 
-def test_semantic_streaming_is_an_explicit_opt_in_environment_switch() -> None:
-    assert read_semantic_streaming_from_environment({}) is False
+def test_semantic_streaming_is_default_on_with_an_explicit_opt_out() -> None:
+    assert read_semantic_streaming_from_environment({}) is True
     assert read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: "0"}) is False
     assert read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: " 1 "}) is True
 
     with pytest.raises(ValueError):
         read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: "true"})
+
+
+def test_edge_constructor_defaults_to_semantic_streaming_and_preserves_raw_opt_out() -> None:
+    default_edge = DiscordTextEdge(
+        client=cast(Any, FakeClient()),
+        runtime_factory=lambda: FakeRuntime(),
+        edit_interval_s=0.0,
+        close_timeout_s=2.0,
+        semantic_lookahead_s=0.0,
+    )
+    raw_edge = DiscordTextEdge(
+        client=cast(Any, FakeClient()),
+        runtime_factory=lambda: FakeRuntime(),
+        edit_interval_s=0.0,
+        close_timeout_s=2.0,
+        semantic_streaming=False,
+        semantic_lookahead_s=0.0,
+    )
+
+    assert default_edge._semantic_streaming is True  # pyright: ignore[reportPrivateUsage]
+    assert raw_edge._semantic_streaming is False  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(default_edge.close())
+    asyncio.run(raw_edge.close())
 
 
 def test_duplicate_message_id_creates_exactly_one_core_turn() -> None:
@@ -528,5 +552,34 @@ def test_shutdown_cancels_an_active_owned_run_before_runtime_close() -> None:
         assert runtime.shutdown_called
         assert client.closed
         assert edge.active_task_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_edge_close_surfaces_runtime_shutdown_failure_after_closing_client() -> None:
+    class FailingRuntime(FakeRuntime):
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+            raise RuntimeError("synthetic runtime shutdown failure")
+
+    async def scenario() -> None:
+        runtime = FailingRuntime()
+        edge, client = edge_for(lambda: runtime)
+        channel = FakeChannel("dm-1")
+        await edge.handle_message(inbound(channel, "message-1", "hello"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        finish(runtime.generations[0], "reply")
+        await edge.wait_idle()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Discord edge shutdown did not complete cleanly",
+        ) as raised:
+            await edge.close()
+
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == "synthetic runtime shutdown failure"
+        assert runtime.shutdown_called
+        assert client.closed
 
     asyncio.run(scenario())

@@ -1,4 +1,4 @@
-"""Pure helpers for the opt-in semantic Discord presentation experiment."""
+"""Pure helpers for the semantic Discord presentation policy."""
 
 from __future__ import annotations
 

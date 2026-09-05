@@ -76,10 +76,13 @@ most 2000 characters. Cancelled or superseded output is marked
 failed output is marked `[response unavailable]` and failed assistant text is
 never committed by Core.
 
-The default presentation mode is the raw latest-snapshot mode described above.
-It is the baseline for the pacing experiment and remains unchanged unless the
-operator opts in. Set `LILAVEL_DISCORD_SEMANTIC_STREAMING=1` to enable the
-experimental semantic mode; `0` or an absent variable keeps the baseline.
+The default presentation mode is semantic streaming. It publishes the first
+meaningful delta immediately, then prefers safe newline/sentence/clause/word
+boundaries while retaining the raw latest-snapshot text internally. Set
+`LILAVEL_DISCORD_SEMANTIC_STREAMING=0` to disable semantic presentation for a
+diagnostic run or rollback to the supported raw latest-snapshot baseline. Set
+the variable to `1` to state the normal default explicitly. The semantic
+algorithm and its bounded lookahead are otherwise unchanged.
 
 Semantic mode still publishes the first meaningful delta immediately. At later
 publish opportunities it chooses a raw prefix near the tail, keeping a small
@@ -158,6 +161,13 @@ The semantic experiment is independent of this interval override. For example:
 
 ```powershell
 $env:LILAVEL_DISCORD_EDIT_INTERVAL_S = "1.0"
-$env:LILAVEL_DISCORD_SEMANTIC_STREAMING = "1"
+uv run --locked python scripts/run_edge.py
+```
+
+To run the raw baseline explicitly:
+
+```powershell
+$env:LILAVEL_DISCORD_EDIT_INTERVAL_S = "1.0"
+$env:LILAVEL_DISCORD_SEMANTIC_STREAMING = "0"
 uv run --locked python scripts/run_edge.py
 ```

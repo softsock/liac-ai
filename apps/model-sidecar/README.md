@@ -83,11 +83,14 @@ generation lifecycle and semantic state; this host owns provider and process
 transport state only.
 
 When Core launches the host on Windows, it starts the default `npx` launcher
-suspended, verifies Job Object containment, and resumes it only after the
-containment handle is attached. Forced containment therefore covers the
-`npx`/Node/cmd/Bun descendant tree. If containment setup fails, Core fails
-closed. The POSIX fallback targets the owned process and does not claim the
-same descendant guarantee.
+with `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP`, verifies Job Object
+containment, and resumes it only after the containment handle is attached.
+The separate console process group lets Core receive an operator Ctrl+C and
+send the sidecar's graceful cancel-then-shutdown sequence instead of allowing
+the child to terminate in the middle of a JSONL frame. Forced containment
+therefore covers the `npx`/Node/cmd/Bun descendant tree. If containment setup
+fails, Core fails closed. The POSIX fallback targets the owned process and
+does not claim the same descendant guarantee.
 
 For a local diagnostic run, use `bun run smoke -- "prompt"`. Its diagnostic
 event JSON is temporary output and does not print credentials, request text,

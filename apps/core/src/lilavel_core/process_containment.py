@@ -5,7 +5,10 @@ Windows launches the configured sidecar through ``npx.cmd``.  A plain
 ``cmd.exe``, and Bun descendants running.  This module gives the runtime a
 small ownership handle backed by a Windows Job Object.  The process must be
 created suspended, so the job is assigned before the first instruction can
-spawn a descendant.
+spawn a descendant.  It is also created as a separate console process group:
+an operator's Ctrl+C must reach the Core owner so it can send the sidecar's
+graceful shutdown command, rather than terminating the child in the middle
+of a JSONL frame.
 
 The module deliberately has no restart policy.  If job setup or the suspended
 launch gate cannot be established, attaching containment fails and the caller
@@ -23,6 +26,7 @@ from ctypes import wintypes
 from typing import Any, Final
 
 _CREATE_SUSPENDED: Final = 0x00000004
+_CREATE_NEW_PROCESS_GROUP: Final = 0x00000200
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Final = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: Final = 9
 _PROCESS_SET_QUOTA: Final = 0x0100
@@ -128,9 +132,9 @@ if _KERNEL32 is not None:
 
 
 def process_creation_flags() -> int:
-    """Return the creation flags required before attaching containment."""
+    """Return suspended, Ctrl+C-isolated flags before attaching containment."""
 
-    return _CREATE_SUSPENDED if os.name == "nt" else 0
+    return (_CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
 
 
 def _win32_error(operation: str) -> ProcessContainmentError:

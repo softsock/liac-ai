@@ -68,7 +68,20 @@ child exit, no pending generation, and confirmed containment teardown. A
 missing acknowledgement, abnormal child exit, forced shutdown deadline, or
 unsettled handle leaves the runtime failed. A pending handle is settled before
 forced containment so its failure preserves the known cause (`ShutdownTimeout`
-or `SidecarCrashed`) instead of being replaced by child EOF.
+or `SidecarCrashed`) instead of being replaced by child EOF. The stdout reader
+remains strict through EOF: a non-empty unterminated line is a malformed
+protocol frame, including after a shutdown request; only the sidecar's valid
+acknowledgement followed by a zero exit is clean.
+
+On Windows, Core launches the default `npx` entry point with
+`CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP`, verifies Job Object
+containment, and resumes it only after the containment handle is attached.
+The separate console process group prevents an operator Ctrl+C from killing
+the child in the middle of a JSONL frame; Core can instead send the defined
+cancel-then-shutdown command sequence and require the normal acknowledgement.
+Forced containment still covers the `npx`/Node/cmd/Bun descendant tree. The
+POSIX fallback targets the owned process and does not claim the same
+descendant guarantee.
 
 ## Streaming consumer contract
 
