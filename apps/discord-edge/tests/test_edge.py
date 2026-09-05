@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any, cast
 
+import pytest
 from lilavel_core import (
     ContextMessage,
     ConversationCore,
@@ -62,11 +63,14 @@ class FakeTyping:
 
 
 class FakeMessage:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, fail_edits: bool = False) -> None:
         self.content = content
+        self.fail_edits = fail_edits
         self.edits: list[dict[str, Any]] = []
 
     async def edit(self, **kwargs: Any) -> FakeMessage:
+        if self.fail_edits:
+            raise RuntimeError("synthetic edit failure")
         self.edits.append(kwargs)
         self.content = cast(str, kwargs["content"])
         return self
@@ -78,6 +82,7 @@ class FakeChannel:
         self.is_dm = is_dm
         self.typing_entries = 0
         self.typing_exits = 0
+        self.fail_edits = False
         self.sends: list[dict[str, Any]] = []
         self.messages: list[FakeMessage] = []
 
@@ -86,7 +91,7 @@ class FakeChannel:
 
     async def send(self, **kwargs: Any) -> FakeMessage:
         self.sends.append(kwargs)
-        message = FakeMessage(cast(str, kwargs["content"]))
+        message = FakeMessage(cast(str, kwargs["content"]), fail_edits=self.fail_edits)
         self.messages.append(message)
         return message
 
@@ -401,6 +406,29 @@ def test_failure_marks_reply_without_committing_assistant_text() -> None:
 
         assert channel.messages[0].content.endswith(FAILED_MARKER)
         assert cores[0].history == (ContextMessage("user", "hello"),)
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
+def test_presenter_sink_failure_propagates_without_leaving_response_task_waiting() -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        edge, _ = edge_for(lambda: runtime)
+        channel = FakeChannel("dm-1")
+        channel.fail_edits = True
+
+        await edge.handle_message(inbound(channel, "message-1", "hello"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        generation = runtime.generations[0]
+        generation.emit(GenerationAccepted(generation.generation_id, generation.epoch))
+        generation.emit(TextDelta(generation.generation_id, generation.epoch, "first"))
+        await wait_until(lambda: len(channel.messages) == 1)
+        generation.emit(TextDelta(generation.generation_id, generation.epoch, " second"))
+
+        with pytest.raises(RuntimeError, match="synthetic edit failure"):
+            await edge.wait_idle()
+        assert runtime.cancelled_ids == [generation.generation_id]
         await edge.close()
 
     asyncio.run(scenario())

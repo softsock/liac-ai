@@ -29,7 +29,7 @@ from .presenter import ReplyPresenter
 from .transport import DiscordMessageSink, TransportMetrics, validate_edit_interval
 
 DISCORD_TOKEN_ENV: Final = "LILAVEL_DISCORD_BOT_TOKEN"
-DEFAULT_EDIT_INTERVAL_S: Final = 0.5
+DEFAULT_EDIT_INTERVAL_S: Final = 0.2
 DEFAULT_CLOSE_TIMEOUT_S: Final = 15.0
 DEFAULT_DEDUPE_CAPACITY: Final = 4096
 
@@ -355,18 +355,33 @@ class DiscordTextEdge:
             clock=self._clock,
         )
         bridge = _ConversationEventBridge(run, asyncio.get_running_loop())
-        bridge.start()
+        event_task: asyncio.Task[ConversationEvent | _BridgeEnd] | None = None
+        presenter_error_task: asyncio.Task[BaseException] | None = None
+        presenter.start()
         try:
+            bridge.start()
+            presenter_error_task = asyncio.create_task(
+                presenter.wait_for_error(),
+                name="lilavel-discord-reply-presenter-error",
+            )
             while True:
-                item = await bridge.queue.get()
+                event_task = asyncio.create_task(
+                    bridge.queue.get(),
+                    name="lilavel-discord-event-bridge-get",
+                )
+                done, _ = await asyncio.wait(
+                    (event_task, presenter_error_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if presenter_error_task in done:
+                    raise presenter_error_task.result()
+                item = event_task.result()
                 if isinstance(item, _BridgeEnd):
                     if item.error is not None or not presenter.finalized:
                         await presenter.failed(run.text)
                     return
                 if isinstance(item, ConversationTextDelta):
                     presenter.append_delta(item.delta)
-                    if presenter.ready_to_flush():
-                        await presenter.flush()
                 elif isinstance(item, ConversationCompleted):
                     await presenter.complete(item.text)
                     return
@@ -385,6 +400,15 @@ class DiscordTextEdge:
                 run.cancel()
             raise
         finally:
+            if event_task is not None and not event_task.done():
+                event_task.cancel()
+            if presenter_error_task is not None and not presenter_error_task.done():
+                presenter_error_task.cancel()
+            if event_task is not None:
+                await asyncio.gather(event_task, return_exceptions=True)
+            if presenter_error_task is not None:
+                await asyncio.gather(presenter_error_task, return_exceptions=True)
+            await presenter.shutdown()
             await asyncio.to_thread(bridge.join, self._close_timeout_s)
 
     async def _present_failure(self, channel: Any) -> None:

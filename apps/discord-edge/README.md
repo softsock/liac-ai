@@ -60,13 +60,19 @@ Discord idempotency store in this slice.
 Core remains responsible for canonical history, successful assistant commit,
 one active run per conversation, supersession, and physical cancellation.
 The edge consumes only semantic run events. It starts typing before Core/model
-work, creates the first visible response on the first meaningful delta, and
-edits only when the configurable 0.5-second coalescing cadence is due. A
-terminal event forces one final reconciliation. Every create and edit passes
-`AllowedMentions.none()`. Text is split on Unicode code-point boundaries into
-messages of at most 2000 characters. Cancelled or superseded output is marked
-`[response interrupted]`; failed output is marked `[response unavailable]` and
-failed assistant text is never committed by Core.
+work and gives each response an owned presenter pump. The first meaningful
+delta materializes a message as soon as practical; later deltas update one
+latest-text snapshot. At most one Discord reconciliation is in flight, and a
+configurable minimum cadence floor (currently `0.2` seconds by default) limits
+new publish attempts without imposing a fixed 0.5-second wait after every
+edit. When an edit completes, a newer snapshot is published on the next
+eligible wake-up; a timer wake-up prevents queued deltas from waiting for an
+unrelated future delta. A terminal event forces exactly one final
+reconciliation. Every create and edit passes `AllowedMentions.none()`.
+Text is split on Unicode code-point boundaries into messages of at most 2000
+characters. Cancelled or superseded output is marked `[response interrupted]`;
+failed output is marked `[response unavailable]` and failed assistant text is
+never committed by Core.
 
 The current `ModelRuntime` admits one physical generation at a time. Keeping
 one runtime with each mapped Core session preserves that existing boundary and
