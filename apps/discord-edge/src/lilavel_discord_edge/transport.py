@@ -20,7 +20,7 @@ MAX_DISCORD_MESSAGE_CHARS: Final = 2000
 class RateLimitObservation:
     """A surfaced HTTP 429; discord.py normally handles route backoff itself."""
 
-    operation: Literal["send", "edit"]
+    operation: Literal["send", "edit", "delete"]
     retry_after_s: float | None
 
 
@@ -30,6 +30,7 @@ class TransportMetrics:
 
     send_latencies_s: list[float] = field(default_factory=lambda: list[float]())
     edit_latencies_s: list[float] = field(default_factory=lambda: list[float]())
+    delete_latencies_s: list[float] = field(default_factory=lambda: list[float]())
     rate_limits: list[RateLimitObservation] = field(
         default_factory=lambda: list[RateLimitObservation]()
     )
@@ -105,8 +106,21 @@ class DiscordMessageSink:
         self.metrics.edit_latencies_s.append(self._clock() - started)
         return edited
 
+    async def delete(self, message: Any) -> None:
+        started = self._clock()
+        try:
+            if self._diagnostics is None:
+                await message.delete()
+            else:
+                with self._diagnostics.operation("DELETE message"):
+                    await message.delete()
+        except discord.HTTPException as error:
+            self._record_rate_limit("delete", error)
+            raise
+        self.metrics.delete_latencies_s.append(self._clock() - started)
+
     def _record_rate_limit(
-        self, operation: Literal["send", "edit"], error: discord.HTTPException
+        self, operation: Literal["send", "edit", "delete"], error: discord.HTTPException
     ) -> None:
         if getattr(error, "status", None) != 429:
             return

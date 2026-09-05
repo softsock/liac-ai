@@ -24,9 +24,11 @@ from lilavel_discord_edge import (
     DISCORD_TOKEN_ENV,
     FAILED_MARKER,
     INTERRUPTED_MARKER,
+    SEMANTIC_STREAMING_ENV,
     DiscordTextEdge,
     make_dm_intents,
     read_discord_token,
+    read_semantic_streaming_from_environment,
 )
 from lilavel_discord_edge.edge import (
     EDIT_INTERVAL_ENV,
@@ -176,6 +178,8 @@ def edge_for(
     *,
     core_factory: Any = ConversationCore,
     message_filter: Any = default_message_filter,
+    semantic_streaming: bool = False,
+    semantic_lookahead_s: float = 0.0,
 ) -> tuple[DiscordTextEdge, FakeClient]:
     client = FakeClient()
     edge = DiscordTextEdge(
@@ -185,6 +189,8 @@ def edge_for(
         message_filter=message_filter,
         edit_interval_s=0.0,
         close_timeout_s=2.0,
+        semantic_streaming=semantic_streaming,
+        semantic_lookahead_s=semantic_lookahead_s,
     )
     return edge, client
 
@@ -222,6 +228,15 @@ def test_edit_pacing_override_accepts_controlled_experiment_values() -> None:
 
     with pytest.raises(ValueError):
         read_edit_interval_from_environment({EDIT_INTERVAL_ENV: "nan"})
+
+
+def test_semantic_streaming_is_an_explicit_opt_in_environment_switch() -> None:
+    assert read_semantic_streaming_from_environment({}) is False
+    assert read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: "0"}) is False
+    assert read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: " 1 "}) is True
+
+    with pytest.raises(ValueError):
+        read_semantic_streaming_from_environment({SEMANTIC_STREAMING_ENV: "true"})
 
 
 def test_duplicate_message_id_creates_exactly_one_core_turn() -> None:
@@ -395,6 +410,32 @@ def test_supersede_marks_old_reply_interrupted_and_discards_partial_core_output(
             ContextMessage("user", "new turn"),
             ContextMessage("assistant", "fresh"),
         )
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
+def test_semantic_edge_does_not_reveal_unpublished_tail_on_cancellation() -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        edge, _ = edge_for(
+            lambda: runtime,
+            semantic_streaming=True,
+            semantic_lookahead_s=0.0,
+        )
+        channel = FakeChannel("dm-1")
+        await edge.handle_message(inbound(channel, "message-1", "hello"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        generation = runtime.generations[0]
+        generation.emit(GenerationAccepted(generation.generation_id, generation.epoch))
+        generation.emit(TextDelta(generation.generation_id, generation.epoch, "seen"))
+        await wait_until(lambda: channel.messages and channel.messages[0].content == "seen")
+        generation.emit(TextDelta(generation.generation_id, generation.epoch, " hidden-partial"))
+        generation.emit(GenerationCancelled(generation.generation_id, generation.epoch))
+        await edge.wait_idle()
+
+        assert channel.messages[0].content == "seen" + INTERRUPTED_MARKER
+        assert "hidden-partial" not in channel.messages[0].content
         await edge.close()
 
     asyncio.run(scenario())

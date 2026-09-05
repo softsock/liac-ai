@@ -70,10 +70,34 @@ published on the next eligible wake-up; a timer wake-up prevents queued deltas
 from waiting for an unrelated future delta. A terminal event is the only
 operation that can bypass the interval and forces exactly one final
 reconciliation. Every create and edit passes `AllowedMentions.none()`.
-Text is split on Unicode code-point boundaries into messages of at most 2000
-characters. Cancelled or superseded output is marked `[response interrupted]`;
+Baseline text is split on Unicode code-point boundaries into messages of at
+most 2000 characters. Cancelled or superseded output is marked
+`[response interrupted]`;
 failed output is marked `[response unavailable]` and failed assistant text is
 never committed by Core.
+
+The default presentation mode is the raw latest-snapshot mode described above.
+It is the baseline for the pacing experiment and remains unchanged unless the
+operator opts in. Set `LILAVEL_DISCORD_SEMANTIC_STREAMING=1` to enable the
+experimental semantic mode; `0` or an absent variable keeps the baseline.
+
+Semantic mode still publishes the first meaningful delta immediately. At later
+publish opportunities it chooses a raw prefix near the tail, keeping a small
+hidden tail (80 characters by default). Normal prose prefers newline/paragraph,
+then sentence punctuation, clause punctuation, and finally a word boundary.
+It waits at most 125 ms for a stronger boundary and then uses a safe word or
+grapheme fallback; it never waits for a complete sentence indefinitely. Inside
+fenced code, newline and whitespace are preferred and prose punctuation is
+ignored. Prefix selection and continuation splitting use Unicode grapheme
+boundaries, including emoji ZWJ sequences and combining marks.
+
+For display only, an unmatched fenced-code delimiter is temporarily closed and
+an unmatched inline backtick is temporarily paired. The raw generated text is
+rebuilt for every publish and successful terminal completion publishes the
+exact full text without repair. If a temporary preview needed an extra
+continuation message, terminal reconciliation deletes only that presenter-owned
+extra message so the final Discord message sequence remains exact. Link and
+emphasis balancing is intentionally out of scope for this small experiment.
 
 The current `ModelRuntime` admits one physical generation at a time. Keeping
 one runtime with each mapped Core session preserves that existing boundary and
@@ -96,9 +120,10 @@ voice, DAVE, persistence, memory, character behavior, tools, MCP, or
 
 ## Optional HTTP diagnostics
 
-The edge can emit safe JSONL diagnostics to stderr for message `POST` and
-`PATCH` operations. This is disabled by default and uses discord.py's public
-`http_trace` hook; it does not change presenter cadence or retry behavior.
+The edge can emit safe JSONL diagnostics to stderr for message `POST`, `PATCH`,
+and semantic-preview cleanup `DELETE` operations. This is disabled by default
+and uses discord.py's public `http_trace` hook; it does not change presenter
+cadence or retry behavior.
 
 ```powershell
 $env:LILAVEL_DISCORD_HTTP_DIAGNOSTICS = "1"
@@ -116,6 +141,11 @@ to the awaited discord.py operation return; it includes body handling and any
 library lifecycle wait, so it is evidence for (not a direct hook into) a
 discord.py pre-emptive rate-limit sleep.
 
+When semantic mode and diagnostics are both enabled, `semantic_selection`
+records add only boundary class, raw/visible/hidden character counts,
+lookahead duration and cap, hidden-tail age, preview-repair status, and whether
+the selected snapshot changed Discord. Response text is never included.
+
 ## Pacing experiment override
 
 `run_edge.py` accepts the optional `LILAVEL_DISCORD_EDIT_INTERVAL_S` environment
@@ -123,3 +153,11 @@ variable. It is intended for controlled pacing experiments such as `0.8`,
 `1.0`, and `1.2` seconds; invalid values fail before the Discord client starts.
 The first POST remains immediate, while intermediate updates use the configured
 interval and terminal reconciliation retains its force semantics.
+
+The semantic experiment is independent of this interval override. For example:
+
+```powershell
+$env:LILAVEL_DISCORD_EDIT_INTERVAL_S = "1.0"
+$env:LILAVEL_DISCORD_SEMANTIC_STREAMING = "1"
+uv run --locked python scripts/run_edge.py
+```

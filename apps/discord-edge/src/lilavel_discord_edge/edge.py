@@ -27,10 +27,12 @@ from lilavel_core import (
 
 from .diagnostics import DiscordDiagnostics, attach_http_trace
 from .presenter import DEFAULT_EDIT_INTERVAL_S, ReplyPresenter
+from .semantic import DEFAULT_SEMANTIC_LOOKAHEAD_S, DEFAULT_SEMANTIC_MAX_TAIL_CHARS
 from .transport import DiscordMessageSink, TransportMetrics, validate_edit_interval
 
 DISCORD_TOKEN_ENV: Final = "LILAVEL_DISCORD_BOT_TOKEN"
 EDIT_INTERVAL_ENV: Final = "LILAVEL_DISCORD_EDIT_INTERVAL_S"
+SEMANTIC_STREAMING_ENV: Final = "LILAVEL_DISCORD_SEMANTIC_STREAMING"
 DEFAULT_CLOSE_TIMEOUT_S: Final = 15.0
 DEFAULT_DEDUPE_CAPACITY: Final = 4096
 
@@ -66,6 +68,20 @@ def read_edit_interval_from_environment(environ: Mapping[str, str] | None = None
     except ValueError as error:
         raise ValueError(f"{EDIT_INTERVAL_ENV} must be a finite, nonnegative number") from error
     return value
+
+
+def read_semantic_streaming_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Read the opt-in semantic presentation experiment switch."""
+
+    source = os.environ if environ is None else environ
+    raw_value = source.get(SEMANTIC_STREAMING_ENV)
+    if raw_value is None or raw_value.strip() == "0":
+        return False
+    if raw_value.strip() == "1":
+        return True
+    raise ValueError(f"{SEMANTIC_STREAMING_ENV} must be '0' or '1'")
 
 
 def make_dm_intents() -> discord.Intents:
@@ -174,10 +190,16 @@ class DiscordTextEdge:
         close_timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S,
         clock: Callable[[], float] = time.perf_counter,
         diagnostics: DiscordDiagnostics | None = None,
+        semantic_streaming: bool = False,
+        semantic_lookahead_s: float = DEFAULT_SEMANTIC_LOOKAHEAD_S,
+        semantic_max_tail_chars: int = DEFAULT_SEMANTIC_MAX_TAIL_CHARS,
     ) -> None:
         if close_timeout_s <= 0:
             raise ValueError("close_timeout_s must be positive")
         validate_edit_interval(edit_interval_s)
+        validate_edit_interval(semantic_lookahead_s)
+        if isinstance(semantic_max_tail_chars, bool) or semantic_max_tail_chars <= 0:
+            raise ValueError("semantic_max_tail_chars must be positive")
         if client is None:
             client_options: dict[str, Any] = {"intents": make_dm_intents()}
             if diagnostics is not None:
@@ -194,6 +216,9 @@ class DiscordTextEdge:
         self._close_timeout_s = close_timeout_s
         self._clock = clock
         self._diagnostics = diagnostics
+        self._semantic_streaming = semantic_streaming
+        self._semantic_lookahead_s = semantic_lookahead_s
+        self._semantic_max_tail_chars = semantic_max_tail_chars
         self._dedupe = _MessageIdDeduplicator(dedupe_capacity)
         self._sessions: dict[str, _ConversationSession] = {}
         self._session_lock = asyncio.Lock()
@@ -387,6 +412,9 @@ class DiscordTextEdge:
             edit_interval_s=self._edit_interval_s,
             clock=self._clock,
             diagnostics=self._diagnostics,
+            semantic_streaming=self._semantic_streaming,
+            semantic_lookahead_s=self._semantic_lookahead_s,
+            semantic_max_tail_chars=self._semantic_max_tail_chars,
         )
         bridge = _ConversationEventBridge(run, asyncio.get_running_loop())
         event_task: asyncio.Task[ConversationEvent | _BridgeEnd] | None = None
@@ -451,6 +479,9 @@ class DiscordTextEdge:
             edit_interval_s=self._edit_interval_s,
             clock=self._clock,
             diagnostics=self._diagnostics,
+            semantic_streaming=self._semantic_streaming,
+            semantic_lookahead_s=self._semantic_lookahead_s,
+            semantic_max_tail_chars=self._semantic_max_tail_chars,
         )
         await presenter.failed("")
 

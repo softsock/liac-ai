@@ -7,10 +7,12 @@ from .diagnostics import (
 )
 from .edge import (
     DISCORD_TOKEN_ENV,
+    SEMANTIC_STREAMING_ENV,
     DiscordTextEdge,
     MissingDiscordToken,
     make_dm_intents,
     read_discord_token,
+    read_semantic_streaming_from_environment,
 )
 from .presenter import (
     FAILED_MARKER,
@@ -40,10 +42,12 @@ __all__ = [
     "NO_RESPONSE_MARKER",
     "RateLimitObservation",
     "ReplyPresenter",
+    "SEMANTIC_STREAMING_ENV",
     "TransportMetrics",
     "make_dm_intents",
     "diagnostics_from_environment",
     "read_discord_token",
+    "read_semantic_streaming_from_environment",
     "run_transport_probe",
     "split_discord_content",
 ]

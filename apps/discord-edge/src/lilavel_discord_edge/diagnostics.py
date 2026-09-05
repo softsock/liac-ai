@@ -18,7 +18,7 @@ from typing import Any, Final, Literal, cast
 from aiohttp import TraceConfig
 
 DISCORD_HTTP_DIAGNOSTICS_ENV: Final = "LILAVEL_DISCORD_HTTP_DIAGNOSTICS"
-MessageOperation = Literal["POST message", "PATCH message"]
+MessageOperation = Literal["POST message", "PATCH message", "DELETE message"]
 DiagnosticEvent = dict[str, object]
 DiagnosticEmitter = Callable[[Mapping[str, object]], None]
 Clock = Callable[[], float]
@@ -154,6 +154,34 @@ class DiscordDiagnostics:
             )
         finally:
             _active_flush_id.reset(token)
+
+    def semantic_selection(
+        self,
+        *,
+        boundary: str,
+        raw_chars: int,
+        visible_chars: int,
+        hidden_tail_chars: int,
+        hidden_tail_age_s: float | None,
+        lookahead_s: float,
+        max_lookahead_s: float,
+        preview_repaired: bool,
+        published: bool,
+    ) -> None:
+        """Record safe semantic presentation measurements without response text."""
+
+        self._record(
+            "semantic_selection",
+            raw_chars=raw_chars,
+            visible_chars=visible_chars,
+            hidden_tail_chars=hidden_tail_chars,
+            hidden_tail_age_s=hidden_tail_age_s,
+            lookahead_s=lookahead_s,
+            max_lookahead_s=max_lookahead_s,
+            boundary=boundary,
+            preview_repaired=preview_repaired,
+            published=published,
+        )
 
     def _record_operation_return(
         self,
@@ -308,6 +336,8 @@ def _classify_message_route(method: object, path: object) -> MessageOperation | 
         return "POST message"
     if normalized_method == "PATCH" and len(parts) == 6 and parts[5]:
         return "PATCH message"
+    if normalized_method == "DELETE" and len(parts) == 6 and parts[5]:
+        return "DELETE message"
     return None
 
 

@@ -24,6 +24,7 @@ class FakeClock:
 class FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
+        self.deleted = False
 
 
 class FakeSink:
@@ -38,6 +39,9 @@ class FakeSink:
         self.calls.append(("edit", content))
         message.content = content
         return message
+
+    async def delete(self, message: Any) -> None:
+        message.deleted = True
 
 
 class BlockingEditSink(FakeSink):

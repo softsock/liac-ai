@@ -14,11 +14,15 @@ class FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
         self.edits: list[dict[str, Any]] = []
+        self.deleted = False
 
     async def edit(self, **kwargs: Any) -> FakeMessage:
         self.edits.append(kwargs)
         self.content = cast(str, kwargs["content"])
         return self
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 class FakeChannel:

@@ -8,6 +8,7 @@ from lilavel_discord_edge import (
     DiscordTextEdge,
     MissingDiscordToken,
     diagnostics_from_environment,
+    read_semantic_streaming_from_environment,
 )
 from lilavel_discord_edge.edge import read_edit_interval_from_environment
 
@@ -15,6 +16,7 @@ from lilavel_discord_edge.edge import read_edit_interval_from_environment
 async def main() -> int:
     edge = DiscordTextEdge(
         edit_interval_s=read_edit_interval_from_environment(),
+        semantic_streaming=read_semantic_streaming_from_environment(),
         diagnostics=diagnostics_from_environment(),
     )
     try:
