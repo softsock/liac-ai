@@ -92,3 +92,25 @@ uv run --locked pytest
 The package deliberately contains no guild ambient listening, slash commands,
 voice, DAVE, persistence, memory, character behavior, tools, MCP, or
 `AgentSession` integration.
+
+## Optional HTTP diagnostics
+
+The edge can emit safe JSONL diagnostics to stderr for message `POST` and
+`PATCH` operations. This is disabled by default and uses discord.py's public
+`http_trace` hook; it does not change presenter cadence or retry behavior.
+
+```powershell
+$env:LILAVEL_DISCORD_HTTP_DIAGNOSTICS = "1"
+uv run --locked python scripts/transport_probe.py 2> diagnostics.jsonl
+uv run --locked python scripts/run_edge.py 2> diagnostics.jsonl
+```
+
+Records include monotonic timing markers for the presenter flush, awaited
+discord.py operation, HTTP request start, and the response status/headers
+available at aiohttp's response trace point. Only the message route category
+is retained. URLs, authorization headers, request/response bodies, message
+text, exception messages, and raw bucket identifiers are never emitted.
+`post_response_gap_s` is the measured time from the last traced HTTP response
+to the awaited discord.py operation return; it includes body handling and any
+library lifecycle wait, so it is evidence for (not a direct hook into) a
+discord.py pre-emptive rate-limit sleep.

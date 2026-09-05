@@ -11,6 +11,8 @@ from typing import Any, Final, Literal
 import discord
 from discord.abc import Messageable
 
+from .diagnostics import DiscordDiagnostics
+
 MAX_DISCORD_MESSAGE_CHARS: Final = 2000
 
 
@@ -55,19 +57,28 @@ class DiscordMessageSink:
         channel: Messageable,
         *,
         metrics: TransportMetrics | None = None,
+        diagnostics: DiscordDiagnostics | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._channel = channel
         self.metrics = metrics if metrics is not None else TransportMetrics()
+        self._diagnostics = diagnostics
         self._clock = clock
 
     async def create(self, content: str) -> Any:
         started = self._clock()
         try:
-            message = await self._channel.send(
-                content=content,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            if self._diagnostics is None:
+                message = await self._channel.send(
+                    content=content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                with self._diagnostics.operation("POST message"):
+                    message = await self._channel.send(
+                        content=content,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
         except discord.HTTPException as error:
             self._record_rate_limit("send", error)
             raise
@@ -77,10 +88,17 @@ class DiscordMessageSink:
     async def edit(self, message: Any, content: str) -> Any:
         started = self._clock()
         try:
-            edited = await message.edit(
-                content=content,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            if self._diagnostics is None:
+                edited = await message.edit(
+                    content=content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                with self._diagnostics.operation("PATCH message"):
+                    edited = await message.edit(
+                        content=content,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
         except discord.HTTPException as error:
             self._record_rate_limit("edit", error)
             raise

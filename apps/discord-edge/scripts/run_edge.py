@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 
-from lilavel_discord_edge import DiscordTextEdge, MissingDiscordToken
+from lilavel_discord_edge import (
+    DiscordTextEdge,
+    MissingDiscordToken,
+    diagnostics_from_environment,
+)
 
 
 async def main() -> int:
-    edge = DiscordTextEdge()
+    edge = DiscordTextEdge(diagnostics=diagnostics_from_environment())
     try:
         await edge.start()
     except MissingDiscordToken:

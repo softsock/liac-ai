@@ -1,5 +1,10 @@
 """Replaceable DM-first Discord text edge for Lilavel."""
 
+from .diagnostics import (
+    DISCORD_HTTP_DIAGNOSTICS_ENV,
+    DiscordDiagnostics,
+    diagnostics_from_environment,
+)
 from .edge import (
     DISCORD_TOKEN_ENV,
     DiscordTextEdge,
@@ -24,7 +29,9 @@ from .transport import (
 
 __all__ = [
     "DISCORD_TOKEN_ENV",
+    "DISCORD_HTTP_DIAGNOSTICS_ENV",
     "DiscordMessageSink",
+    "DiscordDiagnostics",
     "DiscordTextEdge",
     "FAILED_MARKER",
     "INTERRUPTED_MARKER",
@@ -35,6 +42,7 @@ __all__ = [
     "ReplyPresenter",
     "TransportMetrics",
     "make_dm_intents",
+    "diagnostics_from_environment",
     "read_discord_token",
     "run_transport_probe",
     "split_discord_content",

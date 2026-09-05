@@ -25,6 +25,7 @@ from lilavel_core import (
     ModelRuntime,
 )
 
+from .diagnostics import DiscordDiagnostics, attach_http_trace
 from .presenter import ReplyPresenter
 from .transport import DiscordMessageSink, TransportMetrics, validate_edit_interval
 
@@ -154,11 +155,19 @@ class DiscordTextEdge:
         dedupe_capacity: int = DEFAULT_DEDUPE_CAPACITY,
         close_timeout_s: float = DEFAULT_CLOSE_TIMEOUT_S,
         clock: Callable[[], float] = time.perf_counter,
+        diagnostics: DiscordDiagnostics | None = None,
     ) -> None:
         if close_timeout_s <= 0:
             raise ValueError("close_timeout_s must be positive")
         validate_edit_interval(edit_interval_s)
-        self._client = client or discord.Client(intents=make_dm_intents())
+        if client is None:
+            client_options: dict[str, Any] = {"intents": make_dm_intents()}
+            if diagnostics is not None:
+                client_options["http_trace"] = diagnostics.trace_config
+            self._client = discord.Client(**client_options)
+        else:
+            self._client = client
+            attach_http_trace(self._client, diagnostics)
         self._runtime_factory = runtime_factory
         self._core_factory = core_factory
         self._message_filter = message_filter
@@ -166,6 +175,7 @@ class DiscordTextEdge:
         self._edit_interval_s = edit_interval_s
         self._close_timeout_s = close_timeout_s
         self._clock = clock
+        self._diagnostics = diagnostics
         self._dedupe = _MessageIdDeduplicator(dedupe_capacity)
         self._sessions: dict[str, _ConversationSession] = {}
         self._session_lock = asyncio.Lock()
@@ -350,9 +360,15 @@ class DiscordTextEdge:
     async def _present_run(self, channel: Any, run: ConversationRun) -> None:
         metrics = TransportMetrics()
         presenter = ReplyPresenter(
-            DiscordMessageSink(channel, metrics=metrics, clock=self._clock),
+            DiscordMessageSink(
+                channel,
+                metrics=metrics,
+                diagnostics=self._diagnostics,
+                clock=self._clock,
+            ),
             edit_interval_s=self._edit_interval_s,
             clock=self._clock,
+            diagnostics=self._diagnostics,
         )
         bridge = _ConversationEventBridge(run, asyncio.get_running_loop())
         event_task: asyncio.Task[ConversationEvent | _BridgeEnd] | None = None
@@ -413,9 +429,10 @@ class DiscordTextEdge:
 
     async def _present_failure(self, channel: Any) -> None:
         presenter = ReplyPresenter(
-            DiscordMessageSink(channel, clock=self._clock),
+            DiscordMessageSink(channel, clock=self._clock, diagnostics=self._diagnostics),
             edit_interval_s=self._edit_interval_s,
             clock=self._clock,
+            diagnostics=self._diagnostics,
         )
         await presenter.failed("")
 

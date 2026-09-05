@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Final, Protocol
 
+from .diagnostics import DiscordDiagnostics
 from .transport import MAX_DISCORD_MESSAGE_CHARS, split_discord_content, validate_edit_interval
 
 INTERRUPTED_MARKER: Final = "\n\n[response interrupted]"
@@ -36,11 +37,13 @@ class ReplyPresenter:
         *,
         edit_interval_s: float = 0.2,
         clock: Callable[[], float] = time.perf_counter,
+        diagnostics: DiscordDiagnostics | None = None,
     ) -> None:
         validate_edit_interval(edit_interval_s)
         self._sink = sink
         self._edit_interval_s = edit_interval_s
         self._clock = clock
+        self._diagnostics = diagnostics
         self._text = ""
         self._published_chunks: tuple[str, ...] = ()
         self._messages: list[Any] = []
@@ -222,7 +225,14 @@ class ReplyPresenter:
 
             # A slow request consumes part of the floor; do not add another full wait.
             self._last_publish_started_at = self._clock()
-            await self._reconcile(chunks)
+            if self._diagnostics is None:
+                await self._reconcile(chunks)
+            else:
+                with self._diagnostics.presenter_flush(
+                    chunk_count=len(chunks),
+                    force=force,
+                ):
+                    await self._reconcile(chunks)
             self._published_chunks = chunks
             self.flush_count += 1
             return True

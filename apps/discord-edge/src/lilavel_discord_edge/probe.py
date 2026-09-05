@@ -9,6 +9,7 @@ from typing import Any
 
 import discord
 
+from .diagnostics import DiscordDiagnostics, attach_http_trace
 from .edge import make_dm_intents, read_discord_token
 from .presenter import ReplyPresenter
 from .transport import DiscordMessageSink, TransportMetrics
@@ -31,11 +32,20 @@ class _LiveTransportProbe:
         *,
         client: discord.Client | None = None,
         shutdown_timeout_s: float = _PROBE_SHUTDOWN_TIMEOUT_S,
+        diagnostics: DiscordDiagnostics | None = None,
     ) -> None:
         if shutdown_timeout_s <= 0:
             raise ValueError("shutdown_timeout_s must be positive")
-        self.client = client if client is not None else discord.Client(intents=make_dm_intents())
+        if client is None:
+            client_options: dict[str, Any] = {"intents": make_dm_intents()}
+            if diagnostics is not None:
+                client_options["http_trace"] = diagnostics.trace_config
+            self.client = discord.Client(**client_options)
+        else:
+            self.client = client
+            attach_http_trace(self.client, diagnostics)
         self._shutdown_timeout_s = shutdown_timeout_s
+        self._diagnostics = diagnostics
         self.started_at = time.perf_counter()
         self.ready_at: float | None = None
         self.received_at: float | None = None
@@ -120,8 +130,9 @@ class _LiveTransportProbe:
         self.received_at = received_at
         metrics = TransportMetrics()
         presenter = ReplyPresenter(
-            DiscordMessageSink(message.channel, metrics=metrics),
+            DiscordMessageSink(message.channel, metrics=metrics, diagnostics=self._diagnostics),
             edit_interval_s=60.0,
+            diagnostics=self._diagnostics,
         )
         async with message.channel.typing():
             typing_entered_at = time.perf_counter()
@@ -278,6 +289,7 @@ async def run_transport_probe(
     *,
     token: str | None = None,
     timeout_s: float = _PROBE_TIMEOUT_S,
+    diagnostics: DiscordDiagnostics | None = None,
 ) -> dict[str, Any]:
     """Run Stage A, or return deterministic BLOCKED when the token is absent."""
 
@@ -290,7 +302,10 @@ async def run_transport_probe(
             "reason": "missing LILAVEL_DISCORD_BOT_TOKEN",
             "live_probe": False,
         }
-    probe = _LiveTransportProbe(shutdown_timeout_s=min(_PROBE_SHUTDOWN_TIMEOUT_S, timeout_s))
+    probe = _LiveTransportProbe(
+        shutdown_timeout_s=min(_PROBE_SHUTDOWN_TIMEOUT_S, timeout_s),
+        diagnostics=diagnostics,
+    )
     try:
         return await asyncio.wait_for(probe.run(resolved), timeout_s)
     except TimeoutError:
