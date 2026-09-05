@@ -138,6 +138,35 @@ def test_adaptive_pump_collapses_rapid_deltas_into_latest_snapshot() -> None:
     asyncio.run(scenario())
 
 
+def test_paced_pump_waits_for_interval_then_publishes_latest_snapshot() -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        sink = FakeSink()
+        presenter = ReplyPresenter(sink, edit_interval_s=1.0, clock=clock)
+        presenter.start()
+        presenter.append_delta("a")
+        await wait_until(lambda: sink.calls == [("create", "a")])
+
+        presenter.append_delta("b")
+        await asyncio.sleep(0)
+        assert sink.calls == [("create", "a")]
+
+        clock.value = 0.99
+        presenter.append_delta("c")
+        await asyncio.sleep(0)
+        assert sink.calls == [("create", "a")]
+
+        clock.value = 1.0
+        presenter.append_delta("d")
+        await wait_until(lambda: sink.calls[-1] == ("edit", "abcd"))
+        assert sink.calls == [("create", "a"), ("edit", "abcd")]
+
+        await presenter.complete("abcd")
+        await presenter.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_adaptive_pump_is_single_flight_and_publishes_text_arriving_during_edit() -> None:
     async def scenario() -> None:
         clock = FakeClock()

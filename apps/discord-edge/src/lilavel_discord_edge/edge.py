@@ -26,11 +26,11 @@ from lilavel_core import (
 )
 
 from .diagnostics import DiscordDiagnostics, attach_http_trace
-from .presenter import ReplyPresenter
+from .presenter import DEFAULT_EDIT_INTERVAL_S, ReplyPresenter
 from .transport import DiscordMessageSink, TransportMetrics, validate_edit_interval
 
 DISCORD_TOKEN_ENV: Final = "LILAVEL_DISCORD_BOT_TOKEN"
-DEFAULT_EDIT_INTERVAL_S: Final = 0.2
+EDIT_INTERVAL_ENV: Final = "LILAVEL_DISCORD_EDIT_INTERVAL_S"
 DEFAULT_CLOSE_TIMEOUT_S: Final = 15.0
 DEFAULT_DEDUPE_CAPACITY: Final = 4096
 
@@ -48,6 +48,24 @@ def read_discord_token(environ: Mapping[str, str] | None = None) -> str | None:
         return None
     token = value.strip()
     return token or None
+
+
+def read_edit_interval_from_environment(environ: Mapping[str, str] | None = None) -> float:
+    """Read the optional operator pacing override without changing library defaults."""
+
+    source = os.environ if environ is None else environ
+    raw_value = source.get(EDIT_INTERVAL_ENV)
+    if raw_value is None:
+        return DEFAULT_EDIT_INTERVAL_S
+    try:
+        value = float(raw_value.strip())
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{EDIT_INTERVAL_ENV} must be a finite, nonnegative number") from error
+    try:
+        validate_edit_interval(value)
+    except ValueError as error:
+        raise ValueError(f"{EDIT_INTERVAL_ENV} must be a finite, nonnegative number") from error
+    return value
 
 
 def make_dm_intents() -> discord.Intents:

@@ -9,10 +9,14 @@ from lilavel_discord_edge import (
     MissingDiscordToken,
     diagnostics_from_environment,
 )
+from lilavel_discord_edge.edge import read_edit_interval_from_environment
 
 
 async def main() -> int:
-    edge = DiscordTextEdge(diagnostics=diagnostics_from_environment())
+    edge = DiscordTextEdge(
+        edit_interval_s=read_edit_interval_from_environment(),
+        diagnostics=diagnostics_from_environment(),
+    )
     try:
         await edge.start()
     except MissingDiscordToken:

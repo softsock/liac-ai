@@ -28,6 +28,11 @@ from lilavel_discord_edge import (
     make_dm_intents,
     read_discord_token,
 )
+from lilavel_discord_edge.edge import (
+    EDIT_INTERVAL_ENV,
+    read_edit_interval_from_environment,
+)
+from lilavel_discord_edge.presenter import DEFAULT_EDIT_INTERVAL_S
 
 
 class FakeUser:
@@ -204,6 +209,19 @@ def test_token_reader_is_namespaced_and_does_not_require_a_default_secret() -> N
     assert read_discord_token({}) is None
     assert read_discord_token({DISCORD_TOKEN_ENV: "  token-value  "}) == "token-value"
     assert read_discord_token({DISCORD_TOKEN_ENV: "   "}) is None
+
+
+def test_edit_pacing_override_accepts_controlled_experiment_values() -> None:
+    assert DEFAULT_EDIT_INTERVAL_S == 1.0
+    assert read_edit_interval_from_environment({}) == DEFAULT_EDIT_INTERVAL_S
+    for value in ("0.8", "1.0", "1.2"):
+        assert read_edit_interval_from_environment({EDIT_INTERVAL_ENV: value}) == float(value)
+
+    with pytest.raises(ValueError):
+        read_edit_interval_from_environment({EDIT_INTERVAL_ENV: "not-a-number"})
+
+    with pytest.raises(ValueError):
+        read_edit_interval_from_environment({EDIT_INTERVAL_ENV: "nan"})
 
 
 def test_duplicate_message_id_creates_exactly_one_core_turn() -> None:

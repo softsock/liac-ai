@@ -13,6 +13,7 @@ from .transport import MAX_DISCORD_MESSAGE_CHARS, split_discord_content, validat
 INTERRUPTED_MARKER: Final = "\n\n[response interrupted]"
 FAILED_MARKER: Final = "\n\n[response unavailable]"
 NO_RESPONSE_MARKER: Final = "[no response]"
+DEFAULT_EDIT_INTERVAL_S: Final = 1.0
 
 
 class MessageSink(Protocol):
@@ -35,7 +36,7 @@ class ReplyPresenter:
         self,
         sink: MessageSink,
         *,
-        edit_interval_s: float = 0.2,
+        edit_interval_s: float = DEFAULT_EDIT_INTERVAL_S,
         clock: Callable[[], float] = time.perf_counter,
         diagnostics: DiscordDiagnostics | None = None,
     ) -> None:

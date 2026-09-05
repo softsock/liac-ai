@@ -63,11 +63,12 @@ The edge consumes only semantic run events. It starts typing before Core/model
 work and gives each response an owned presenter pump. The first meaningful
 delta materializes a message as soon as practical; later deltas update one
 latest-text snapshot. At most one Discord reconciliation is in flight, and a
-configurable minimum cadence floor (currently `0.2` seconds by default) limits
-new publish attempts without imposing a fixed 0.5-second wait after every
-edit. When an edit completes, a newer snapshot is published on the next
-eligible wake-up; a timer wake-up prevents queued deltas from waiting for an
-unrelated future delta. A terminal event forces exactly one final
+configurable minimum interval (currently `1.0` second by default) between
+publish starts limits new intermediate attempts without imposing a separate
+fixed wait after every edit. When an edit completes, a newer snapshot is
+published on the next eligible wake-up; a timer wake-up prevents queued deltas
+from waiting for an unrelated future delta. A terminal event is the only
+operation that can bypass the interval and forces exactly one final
 reconciliation. Every create and edit passes `AllowedMentions.none()`.
 Text is split on Unicode code-point boundaries into messages of at most 2000
 characters. Cancelled or superseded output is marked `[response interrupted]`;
@@ -114,3 +115,11 @@ text, exception messages, and raw bucket identifiers are never emitted.
 to the awaited discord.py operation return; it includes body handling and any
 library lifecycle wait, so it is evidence for (not a direct hook into) a
 discord.py pre-emptive rate-limit sleep.
+
+## Pacing experiment override
+
+`run_edge.py` accepts the optional `LILAVEL_DISCORD_EDIT_INTERVAL_S` environment
+variable. It is intended for controlled pacing experiments such as `0.8`,
+`1.0`, and `1.2` seconds; invalid values fail before the Discord client starts.
+The first POST remains immediate, while intermediate updates use the configured
+interval and terminal reconciliation retains its force semantics.
