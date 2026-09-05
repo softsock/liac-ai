@@ -118,3 +118,52 @@ the suspended process is resumed; forced containment therefore covers the
 `npx`/Bun descendant tree. If containment setup cannot be established, Core
 fails closed. The POSIX fallback targets the owned process and does not claim
 the same descendant guarantee.
+
+## Discord text edge
+
+The initial Discord integration lives in `apps/discord-edge` and depends on
+`lilavel-core`; Core has no Discord or `discord.py` dependency. This edge is a
+transport/presentation adapter only:
+
+```text
+Discord MESSAGE_CREATE (one-to-one DM)
+        │
+        ▼
+apps/discord-edge
+  channel metadata → opaque in-memory session identity → ConversationCore
+        │                                              │
+        │                                              ▼
+        │                                       role/text ModelRequest
+        ▼
+Discord typing, send, coalesced edit, continuation
+```
+
+The Discord channel ID never enters canonical Core history or a model request.
+Each mapped DM session owns one `ConversationCore` and the existing
+`ModelRuntime`; this preserves the current runtime's one-physical-generation
+boundary while keeping histories separate. The edge does not add provider
+continuation or session state.
+
+Only one-to-one DM `MESSAGE_CREATE` is admitted. The edge requests only the
+standard `DIRECT_MESSAGES` gateway intent, does not enable guild or privileged
+message-content behavior, and has no message-update/delete handlers. It does
+not import Discord channel history. Self/bot messages are ignored. A bounded
+4096-entry in-memory LRU keyed by the Discord `message_id` is claimed before
+the Core call, making Gateway replay idempotent for the life of the process;
+eviction and process restart are intentionally outside this slice.
+
+The edge consumes only `ConversationRun` semantic events. It owns a blocking
+iterator bridge and explicit response tasks, starts Discord typing while Core
+waits for the first delta, materializes the first meaningful delta immediately,
+and admits later edits only at a configurable cadence. Terminal completion,
+cancellation/supersession, and failure each perform one terminal flush. The
+presenter marks interrupted output visibly and marks failures without exposing
+provider errors. Core remains the only owner of canonical assistant commit;
+partial, cancelled, superseded, or failed assistant text is not added to
+history. All model-generated creates and edits use `AllowedMentions.none()`,
+and every content chunk is at most Discord's 2000-character limit.
+
+The transport edge deliberately excludes guild ambient listening, social
+attention, slash commands, voice/DAVE, persistence, memory, character
+behavior, tools, MCP, and `AgentSession`. Discord voice remains a separate
+future transport concern.

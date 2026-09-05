@@ -99,3 +99,21 @@ an intent: an in-flight `accepted` event may arrive after cancellation, and a
 valid completion may win a completion/cancellation race. Core ignores
 well-formed late events from older or cancelled generations, while malformed,
 future, mismatched, or otherwise invalid protocol events fail closed.
+
+## Initial Discord text edge
+
+The replaceable DM-only edge lives in [`apps/discord-edge`](apps/discord-edge)
+and depends on Core without adding Discord to the semantic package. Its
+isolated transport probe and Core-backed edge checks are documented in the
+[Discord edge README](apps/discord-edge/README.md). Run its authoritative
+checks from that directory:
+
+```powershell
+Set-Location apps/discord-edge
+uv sync --locked
+uv lock --check
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pyright
+uv run --locked pytest
+```
