@@ -16,6 +16,15 @@ The only supported credential variable is `LILAVEL_DISCORD_BOT_TOKEN`. If it
 is absent, the probe exits successfully with a deterministic `BLOCKED` report;
 that is not live evidence.
 
+The event callback only completes the transport exercise and signals its
+completion. The application-owned probe runner owns the `Client.start()` task,
+closes the client after that signal, awaits both the Discord start/connect task
+and the callback settlement, and then computes `shutdown_clean`. A clean value
+requires the awaited client close to complete, `client.is_closed()` to be true,
+the start/connect task to finish normally, the event callback to have settled,
+and the observable websocket to be closed. It does not treat an empty global
+`asyncio` task set as a shutdown contract.
+
 ```powershell
 Set-Location apps/discord-edge
 uv sync --locked
