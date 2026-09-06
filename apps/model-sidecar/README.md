@@ -37,15 +37,15 @@ be started again.
 ## Persistent protocol host
 
 Run `bun run protocol` for the long-lived JSONL host. It reads UTF-8 commands
-from stdin and writes only version-one JSONL protocol events to stdout. Human
+from stdin and writes only version-two JSONL protocol events to stdout. Human
 diagnostics belong on stderr. The supported commands are:
 
 ```json
-{"protocol_version":1,"type":"generate","generation_id":"uuid","epoch":1,"prompt":"Reply exactly OK."}
-{"protocol_version":1,"type":"generate","generation_id":"uuid","epoch":2,"messages":[{"role":"user","text":"Remember the word quartz."},{"role":"assistant","text":"ACK_1"},{"role":"user","text":"What was the word?"}]}
-{"protocol_version":1,"type":"cancel","generation_id":"uuid","epoch":1}
-{"protocol_version":1,"type":"health"}
-{"protocol_version":1,"type":"shutdown"}
+{"protocol_version":2,"type":"generate","generation_id":"uuid","epoch":1,"prompt":"Reply exactly OK."}
+{"protocol_version":2,"type":"generate","generation_id":"uuid","epoch":2,"messages":[{"role":"user","text":"Remember the word quartz."},{"role":"assistant","text":"ACK_1"},{"role":"user","text":"What was the word?"}]}
+{"protocol_version":2,"type":"cancel","generation_id":"uuid","epoch":1}
+{"protocol_version":2,"type":"health"}
+{"protocol_version":2,"type":"shutdown"}
 ```
 
 The host emits `ready`, accepts one active generation, forwards genuine
@@ -71,12 +71,13 @@ only after the sidecar closes successfully. `cleanup_timeout` and
 `cleanup_error` are fatal even if an earlier terminal frame was already
 observed; they never produce a second generation terminal frame.
 
-The version-one protocol enforces a 256 KiB frame, 64 KiB prompt or aggregate
+The version-two protocol enforces a 256 KiB frame, 64 KiB prompt or aggregate
 structured-context text, 16 KiB delta, 256 KiB response, and 128-byte identity
 bounds. Invalid framing or fields are rejected by the parser; Core fails
 closed on future or mismatched generation identities. For structured context,
 the host maps user text to pi-ai `UserMessage` and completed assistant text to
-a typed pi-ai `AssistantMessage` with local adapter metadata. It does not
+a typed pi-ai `AssistantMessage` with local adapter metadata. When present,
+trusted guidance is mapped to pi-ai `Context.systemPrompt`. It does not
 forward provider payloads, response IDs, usage, `sessionId`, or
 `providerSessionState`, and does not retain semantic history. Core owns the
 generation lifecycle and semantic state; this host owns provider and process

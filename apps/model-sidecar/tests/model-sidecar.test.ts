@@ -8,7 +8,7 @@ import {
   type SidecarModel,
   type StreamSimple,
 } from "../src/index.js";
-import { type ContextMessage } from "../src/protocol.js";
+import { PROTOCOL_LIMITS, type ContextMessage } from "../src/protocol.js";
 
 const model = {
   id: "gpt-5.6-luna",
@@ -103,6 +103,51 @@ describe("ModelSidecar", () => {
     expect(observedOptions?.sessionId).toBeUndefined();
     expect(observedOptions?.providerSessionState).toBeUndefined();
     expect(observedOptions?.statefulResponses).toBeUndefined();
+  });
+
+  test("maps trusted guidance exactly to Context.systemPrompt", async () => {
+    let observedContext: Context | undefined;
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      stream: makeStream(async function* (context) {
+        observedContext = context;
+        yield event("text_delta", "guided");
+        yield event("done");
+      }),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate({
+      messages: [{ role: "user", text: "hello" }],
+      system_prompt: ["trusted identity", "trusted behavior"],
+    });
+    await expect(handle.result).resolves.toMatchObject({ status: "completed", text: "guided" });
+
+    expect(observedContext?.systemPrompt).toEqual(["trusted identity", "trusted behavior"]);
+    expect(observedContext?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "hello" }),
+    ]);
+    expect(observedContext?.tools).toBeUndefined();
+  });
+
+  test("enforces the protocol response bound inside the provider adapter", async () => {
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      stream: makeStream(async function* () {
+        yield event("text_delta", "x".repeat(PROTOCOL_LIMITS.maxResponseBytes));
+        yield event("text_delta", "y");
+        yield event("done");
+      }),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("bounded");
+    await expect(handle.result).rejects.toMatchObject({ code: "response_limit" });
+    expect(sidecar.state).toBe("ready");
   });
 
   test("loads and validates the exact bundled Luna model", async () => {

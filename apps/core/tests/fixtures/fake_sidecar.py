@@ -21,7 +21,7 @@ def main() -> int:
 
     emit(
         {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "type": "ready",
             "provider": "fixture",
             "model_id": "fixture-model",
@@ -47,7 +47,7 @@ def main() -> int:
                 continue
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "accepted",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -56,13 +56,13 @@ def main() -> int:
             if mode == "crash-after-accepted":
                 os._exit(3)
             if mode == "malformed-after-accepted":
-                sys.stdout.write('{"protocol_version":1,"type":"unexpected"}\n')
+                sys.stdout.write('{"protocol_version":2,"type":"unexpected"}\n')
                 sys.stdout.flush()
                 return 0
             if mode == "duplicate-accepted":
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "accepted",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -75,7 +75,7 @@ def main() -> int:
                 for index in range(140):
                     emit(
                         {
-                            "protocol_version": 1,
+                            "protocol_version": 2,
                             "type": "text_delta",
                             "generation_id": generation_id,
                             "epoch": epoch,
@@ -84,7 +84,7 @@ def main() -> int:
                     )
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "completed",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -94,7 +94,7 @@ def main() -> int:
             if command.get("prompt") == "cancel":
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "text_delta",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -109,7 +109,7 @@ def main() -> int:
             ):
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "text_delta",
                         "generation_id": cancelled_id,
                         "epoch": cancelled_epoch,
@@ -119,7 +119,7 @@ def main() -> int:
             text = "recovered" if command.get("prompt") == "recovery" else "streamed"
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "text_delta",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -128,7 +128,7 @@ def main() -> int:
             )
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "completed",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -140,7 +140,7 @@ def main() -> int:
             if mode == "cancel-before-accepted" and delayed_generation is not None:
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "accepted",
                         "generation_id": delayed_generation[0],
                         "epoch": delayed_generation[1],
@@ -148,7 +148,7 @@ def main() -> int:
                 )
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "cancelled",
                         "generation_id": delayed_generation[0],
                         "epoch": delayed_generation[1],
@@ -163,7 +163,7 @@ def main() -> int:
             if mode == "cleanup-timeout":
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "failed",
                         "generation_id": command["generation_id"],
                         "epoch": command["epoch"],
@@ -173,7 +173,7 @@ def main() -> int:
                 continue
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "cancelled",
                     "generation_id": command["generation_id"],
                     "epoch": command["epoch"],
@@ -181,7 +181,7 @@ def main() -> int:
             )
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "text_delta",
                     "generation_id": command["generation_id"],
                     "epoch": command["epoch"],
@@ -189,17 +189,17 @@ def main() -> int:
                 }
             )
         elif command_type == "health":
-            emit({"protocol_version": 1, "type": "health", "state": "ready"})
+            emit({"protocol_version": 2, "type": "health", "state": "ready"})
         elif command_type == "shutdown":
             if mode == "shutdown-crash":
                 os._exit(3)
             if mode == "shutdown-no-ack":
                 return 0
             if mode == "shutdown-truncated":
-                sys.stdout.write('{"protocol_version":1,"type":"shutdown"')
+                sys.stdout.write('{"protocol_version":2,"type":"shutdown"')
                 sys.stdout.flush()
                 return 0
-            emit({"protocol_version": 1, "type": "shutdown"})
+            emit({"protocol_version": 2, "type": "shutdown"})
             return 0
     return 0
 

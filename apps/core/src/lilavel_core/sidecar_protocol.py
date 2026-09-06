@@ -1,4 +1,4 @@
-"""Typed version-one JSONL messages shared with the model sidecar."""
+"""Typed version-two JSONL messages shared with the model sidecar."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Final, Literal, cast
 
-PROTOCOL_VERSION: Final = 1
+PROTOCOL_VERSION: Final = 2
 MAX_FRAME_BYTES: Final = 256 * 1024
 MAX_PROMPT_BYTES: Final = 64 * 1024
 MAX_CONTEXT_BYTES: Final = MAX_PROMPT_BYTES
@@ -14,6 +14,7 @@ MAX_DELTA_BYTES: Final = 16 * 1024
 MAX_RESPONSE_BYTES: Final = 256 * 1024
 MAX_ID_BYTES: Final = 128
 MAX_GUIDANCE_BYTES: Final = 16 * 1024
+MAX_GUIDANCE_BLOCKS: Final = 32
 MAX_EPOCH: Final = 2**53 - 1
 
 type ProtocolErrorCode = Literal[
@@ -48,7 +49,7 @@ type ContextRole = Literal["user", "assistant"]
 
 
 class ProtocolError(ValueError):
-    """Raised when a JSONL frame is not a valid version-one protocol message."""
+    """Raised when a JSONL frame is not a valid version-two protocol message."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -74,7 +75,9 @@ class ModelRequest:
 
     ``prompt`` keeps the existing single-turn request shape. ``messages`` is
     the structured extension: an immutable, ordered sequence of only user or
-    assistant text. The sidecar owns adaptation to any provider message type.
+    assistant text. ``system_prompt`` is a separately supplied, trusted
+    guidance block sequence; the sidecar owns adaptation to any provider
+    message type.
     """
 
     prompt: str | None = None
@@ -90,12 +93,7 @@ class ModelRequest:
             assert self.messages is not None
             object.__setattr__(self, "messages", tuple(self.messages))
             _validate_context_messages(self.messages)
-        object.__setattr__(self, "system_prompt", tuple(self.system_prompt))
-        total = 0
-        for block in self.system_prompt:
-            total += len(_bounded_string(block, MAX_PROMPT_BYTES, "system_prompt").encode("utf-8"))
-        if total > MAX_GUIDANCE_BYTES:
-            raise ProtocolError("invalid_field")
+        object.__setattr__(self, "system_prompt", _validate_guidance(self.system_prompt))
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,15 +113,7 @@ class GenerateCommand:
             assert self.messages is not None
             object.__setattr__(self, "messages", tuple(self.messages))
             _validate_context_messages(self.messages)
-        object.__setattr__(self, "system_prompt", tuple(self.system_prompt))
-        if (
-            sum(
-                len(_bounded_string(x, MAX_PROMPT_BYTES, "system_prompt").encode("utf-8"))
-                for x in self.system_prompt
-            )
-            > MAX_GUIDANCE_BYTES
-        ):
-            raise ProtocolError("invalid_field")
+        object.__setattr__(self, "system_prompt", _validate_guidance(self.system_prompt))
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,14 +438,34 @@ def _parse_context_messages(value: object) -> tuple[ContextMessage, ...]:
 def _parse_guidance(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise ProtocolError("invalid_field")
-    raw = cast(list[object], value)
-    if any(not isinstance(item, str) for item in raw):
+    return _validate_guidance(cast(list[object], value))
+
+
+def _validate_guidance(value: object) -> tuple[str, ...]:
+    if isinstance(value, list):
+        items = cast(list[object], value)
+    elif isinstance(value, tuple):
+        items = cast(tuple[object, ...], value)
+    else:
         raise ProtocolError("invalid_field")
-    strings = cast(list[str], raw)
-    result = tuple(_bounded_string(x, MAX_PROMPT_BYTES, "system_prompt") for x in strings)
-    if sum(len(x.encode("utf-8")) for x in result) > MAX_GUIDANCE_BYTES:
+    if len(items) > MAX_GUIDANCE_BLOCKS:
         raise ProtocolError("invalid_field")
-    return result
+
+    result: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for item in items:
+        if not isinstance(item, str):
+            raise ProtocolError("invalid_field")
+        block = _bounded_string(item, MAX_PROMPT_BYTES, "system_prompt")
+        if not block.strip() or block in seen:
+            raise ProtocolError("invalid_field")
+        seen.add(block)
+        result.append(block)
+        total += len(block.encode("utf-8"))
+    if total > MAX_GUIDANCE_BYTES:
+        raise ProtocolError("invalid_field")
+    return tuple(result)
 
 
 def _parse_object(payload: bytes | str) -> dict[str, object]:

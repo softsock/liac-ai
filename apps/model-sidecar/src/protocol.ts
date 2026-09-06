@@ -1,6 +1,6 @@
 import { TextEncoder } from "node:util";
 
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 
 export const PROTOCOL_LIMITS = {
   maxFrameBytes: 256 * 1024,
@@ -10,6 +10,7 @@ export const PROTOCOL_LIMITS = {
   maxResponseBytes: 256 * 1024,
   maxIdBytes: 128,
   maxGuidanceBytes: 16 * 1024,
+  maxGuidanceBlocks: 32,
 } as const;
 
 export type ProtocolErrorCode =
@@ -151,6 +152,7 @@ export class ProtocolError extends Error {
     | "malformed"
     | "unsupported_version"
     | "unknown_field"
+    | "duplicate_field"
     | "invalid_field"
     | "frame_too_large";
 
@@ -159,6 +161,7 @@ export class ProtocolError extends Error {
       | "malformed"
       | "unsupported_version"
       | "unknown_field"
+      | "duplicate_field"
       | "invalid_field"
       | "frame_too_large",
   ) {
@@ -232,12 +235,22 @@ function assertContextMessages(value: unknown): asserts value is ContextMessage[
   if (totalBytes > PROTOCOL_LIMITS.maxContextBytes) throw new ProtocolError("invalid_field");
 }
 
-export function validateSystemPrompt(value: readonly string[]): void {
+export function validateSystemPrompt(value: unknown): asserts value is string[] {
   if (!Array.isArray(value)) throw new ProtocolError("invalid_field");
+  if (value.length > PROTOCOL_LIMITS.maxGuidanceBlocks) throw new ProtocolError("invalid_field");
   let total = 0;
+  const seen = new Set<string>();
   for (const block of value) {
-    if (typeof block !== "string" || new TextEncoder().encode(block).byteLength > PROTOCOL_LIMITS.maxPromptBytes) throw new ProtocolError("invalid_field");
-    total += new TextEncoder().encode(block).byteLength;
+    if (
+      typeof block !== "string" ||
+      block.trim().length === 0 ||
+      seen.has(block) ||
+      encoder.encode(block).byteLength > PROTOCOL_LIMITS.maxPromptBytes
+    ) {
+      throw new ProtocolError("invalid_field");
+    }
+    seen.add(block);
+    total += encoder.encode(block).byteLength;
   }
   if (total > PROTOCOL_LIMITS.maxGuidanceBytes) throw new ProtocolError("invalid_field");
 }
@@ -269,12 +282,151 @@ function assertFrameSize(line: string): void {
   }
 }
 
+function assertStrictJsonSyntax(line: string): void {
+  let index = 0;
+
+  const skipWhitespace = (): void => {
+    while (index < line.length && /\s/.test(line[index] ?? "")) index += 1;
+  };
+
+  const parseString = (): string => {
+    const start = index;
+    if (line[index] !== '"') throw new ProtocolError("malformed");
+    index += 1;
+    while (index < line.length) {
+      const code = line.charCodeAt(index);
+      if (code === 0x22) {
+        index += 1;
+        try {
+          return JSON.parse(line.slice(start, index)) as string;
+        } catch {
+          throw new ProtocolError("malformed");
+        }
+      }
+      if (code < 0x20) throw new ProtocolError("malformed");
+      if (code === 0x5c) {
+        index += 1;
+        if (index >= line.length) throw new ProtocolError("malformed");
+        if (line[index] === "u") {
+          if (!/^[0-9a-fA-F]{4}$/.test(line.slice(index + 1, index + 5))) {
+            throw new ProtocolError("malformed");
+          }
+          index += 5;
+        } else {
+          index += 1;
+        }
+      } else {
+        index += 1;
+      }
+    }
+    throw new ProtocolError("malformed");
+  };
+
+  const parseNumber = (key: string | undefined): void => {
+    const start = index;
+    if (line[index] === "-") index += 1;
+    if (line[index] === "0") {
+      index += 1;
+    } else if (/[1-9]/.test(line[index] ?? "")) {
+      index += 1;
+      while (/\d/.test(line[index] ?? "")) index += 1;
+    } else {
+      throw new ProtocolError("malformed");
+    }
+    if (line[index] === ".") {
+      index += 1;
+      if (!/\d/.test(line[index] ?? "")) throw new ProtocolError("malformed");
+      while (/\d/.test(line[index] ?? "")) index += 1;
+    }
+    if (line[index] === "e" || line[index] === "E") {
+      index += 1;
+      if (line[index] === "+" || line[index] === "-") index += 1;
+      if (!/\d/.test(line[index] ?? "")) throw new ProtocolError("malformed");
+      while (/\d/.test(line[index] ?? "")) index += 1;
+    }
+    if (key === "protocol_version" || key === "epoch") {
+      const token = line.slice(start, index);
+      if (!/^-?(?:0|[1-9]\d*)$/.test(token)) throw new ProtocolError("invalid_field");
+    }
+  };
+
+  const parseValue = (key: string | undefined): void => {
+    skipWhitespace();
+    const character = line[index];
+    if (character === '"') {
+      parseString();
+      return;
+    }
+    if (character === "{") {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set<string>();
+      if (line[index] === "}") {
+        index += 1;
+        return;
+      }
+      while (true) {
+        skipWhitespace();
+        const objectKey = parseString();
+        if (keys.has(objectKey)) throw new ProtocolError("duplicate_field");
+        keys.add(objectKey);
+        skipWhitespace();
+        if (line[index] !== ":") throw new ProtocolError("malformed");
+        index += 1;
+        parseValue(objectKey);
+        skipWhitespace();
+        if (line[index] === "}") {
+          index += 1;
+          return;
+        }
+        if (line[index] !== ",") throw new ProtocolError("malformed");
+        index += 1;
+      }
+    }
+    if (character === "[") {
+      index += 1;
+      skipWhitespace();
+      if (line[index] === "]") {
+        index += 1;
+        return;
+      }
+      while (true) {
+        parseValue(undefined);
+        skipWhitespace();
+        if (line[index] === "]") {
+          index += 1;
+          return;
+        }
+        if (line[index] !== ",") throw new ProtocolError("malformed");
+        index += 1;
+      }
+    }
+    if (character === "-" || /\d/.test(character ?? "")) {
+      parseNumber(key);
+      return;
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (line.startsWith(literal, index)) {
+        index += literal.length;
+        return;
+      }
+    }
+    throw new ProtocolError("malformed");
+  };
+
+  parseValue(undefined);
+  skipWhitespace();
+  if (index !== line.length) throw new ProtocolError("malformed");
+}
+
 export function parseCommand(line: string): ProtocolCommand {
   assertFrameSize(line);
   let value: unknown;
   try {
+    assertStrictJsonSyntax(line);
     value = JSON.parse(line);
-  } catch {
+  } catch (error) {
+    if (error instanceof ProtocolError) throw error;
     throw new ProtocolError("malformed");
   }
   if (!isRecord(value)) throw new ProtocolError("malformed");

@@ -57,13 +57,13 @@ not guarantee a cancelled status.
 If cancellation does not produce a terminal sidecar outcome before the
 deadline, Core raises `CancellationTimeout`, marks the runtime failed, and
 contains the owned process. The retained terminal event uses the corresponding
-version-one `cancellation_timeout` code. Cleanup failures from the sidecar
+version-two `cancellation_timeout` code. Cleanup failures from the sidecar
 (`cleanup_timeout` or `cleanup_error`) and forced protocol shutdown
 (`shutdown_timeout`) also fail closed and prevent reuse. A stale generation
 failure after a handle has already settled cannot create a second settlement,
 but a generationless cleanup failure remains runtime-fatal.
 
-Clean shutdown requires the version-one `shutdown` acknowledgement, a zero
+Clean shutdown requires the version-two `shutdown` acknowledgement, a zero
 child exit, no pending generation, and confirmed containment teardown. A
 missing acknowledgement, abnormal child exit, forced shutdown deadline, or
 unsettled handle leaves the runtime failed. A pending handle is settled before
@@ -110,7 +110,7 @@ partial text available at that boundary. A delta already queued before
 cancellation may still be yielded afterward; later stale or cancelled deltas
 cannot leak into that generation or a later one.
 
-The version-one protocol bounds a prompt at 64 KiB, each delta at 16 KiB, the
+The version-two protocol bounds a prompt at 64 KiB, each delta at 16 KiB, the
 accumulated Core response at 256 KiB, each frame at 256 KiB, and each ID at
 128 UTF-8 bytes. Older generation events are ignored. Future epochs,
 mismatched identities, malformed frames, and invalid lifecycle transitions
@@ -132,7 +132,7 @@ ModelRequest(
 )
 ```
 
-Core sends this as the version-one `generate.messages` array. The complete
+Core sends this as the version-two `generate.messages` array. The complete
 caller-owned context is sent on every request; Core does not persist pi-ai or
 provider-specific fields. The sidecar performs the provider adapter mapping
 and retains no semantic conversation state. The legacy `prompt` form remains
@@ -155,7 +155,10 @@ older run is discarded and cannot enter the new run's event stream.
 
 `ConversationContextComposer` is the narrow seam between canonical history and
 model input. The initial `FullHistoryContextComposer` sends the complete
-provider-neutral `role`/`text` history as a version-one structured request.
+provider-neutral `role`/`text` history as a version-two structured request.
+Optional trusted guidance is carried separately from role/text history.
+Callers must derive it only from trusted, application-owned semantic fixtures;
+`ConversationCore` never promotes user text into this channel.
 Provider metadata, session state, tools, and transport details remain outside
 this layer.
 

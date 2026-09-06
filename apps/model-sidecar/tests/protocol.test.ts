@@ -10,14 +10,14 @@ import {
 describe("sidecar protocol", () => {
   test("round-trips the minimal command and event shapes", () => {
     const command: ProtocolCommand = {
-      protocol_version: 1,
+      protocol_version: 2,
       type: "generate",
       generation_id: "generation-1",
       epoch: 3,
       prompt: "Reply exactly OK.",
     };
     const event = {
-      protocol_version: 1 as const,
+      protocol_version: 2 as const,
       type: "text_delta" as const,
       generation_id: "generation-1",
       epoch: 3,
@@ -29,7 +29,7 @@ describe("sidecar protocol", () => {
     expect(
       JSON.parse(
         encodeEvent({
-          protocol_version: 1,
+          protocol_version: 2,
           type: "failed",
           generation_id: "generation-1",
           epoch: 3,
@@ -41,7 +41,7 @@ describe("sidecar protocol", () => {
 
   test("round-trips caller-owned structured context with only role and text", () => {
     const command: ProtocolCommand = {
-      protocol_version: 1,
+      protocol_version: 2,
       type: "generate",
       generation_id: "generation-structured",
       epoch: 4,
@@ -56,13 +56,31 @@ describe("sidecar protocol", () => {
     expect(JSON.parse(encodeCommand(command))).toEqual(command);
   });
 
+  test("round-trips optional trusted guidance and keeps it separate from messages", () => {
+    const command: ProtocolCommand = {
+      protocol_version: 2,
+      type: "generate",
+      generation_id: "generation-guided",
+      epoch: 5,
+      messages: [{ role: "user", text: "hello" }],
+      system_prompt: ["trusted identity", "trusted behavior"],
+    };
+
+    expect(parseCommand(encodeCommand(command).trim())).toEqual(command);
+    expect(JSON.parse(encodeCommand(command))).toMatchObject({ system_prompt: command.system_prompt });
+  });
+
   test("rejects unknown fields, invalid versions, and oversized values", () => {
-    expect(() => parseCommand('{"protocol_version":1,"type":"health","extra":true}')).toThrow();
-    expect(() => parseCommand('{"protocol_version":2,"type":"health"}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":2,"type":"health","extra":true}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":1,"type":"health"}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":2.0,"type":"health"}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":2,"type":"generate","generation_id":"x","epoch":1.0,"prompt":"x"}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":2,"type":"health","type":"health"}')).toThrow();
+    expect(() => parseCommand('{"protocol_version":2,"type":"generate","generation_id":"x","epoch":1,"prompt":"x","system_prompt":[],"system_prompt":[]}')).toThrow();
     expect(() =>
       parseCommand(
         JSON.stringify({
-          protocol_version: 1,
+          protocol_version: 2,
           type: "generate",
           generation_id: "generation-1",
           epoch: 1,
@@ -73,7 +91,7 @@ describe("sidecar protocol", () => {
     expect(() =>
       parseCommand(
         JSON.stringify({
-          protocol_version: 1,
+          protocol_version: 2,
           type: "generate",
           generation_id: "generation-1",
           epoch: 1,
@@ -85,7 +103,7 @@ describe("sidecar protocol", () => {
     expect(() =>
       parseCommand(
         JSON.stringify({
-          protocol_version: 1,
+          protocol_version: 2,
           type: "generate",
           generation_id: "generation-1",
           epoch: 1,
@@ -95,18 +113,30 @@ describe("sidecar protocol", () => {
     ).toThrow();
     expect(() =>
       encodeEvent({
-        protocol_version: 1,
+        protocol_version: 2,
         type: "text_delta",
         generation_id: "generation-1",
         epoch: 1,
         delta: "",
       }),
     ).toThrow();
+    expect(() =>
+      parseCommand(
+        JSON.stringify({
+          protocol_version: 2,
+          type: "generate",
+          generation_id: "generation-1",
+          epoch: 1,
+          messages: [{ role: "user", text: "hello" }],
+          system_prompt: [" ", " "]
+        }),
+      ),
+    ).toThrow();
   });
 
   test("preserves UTF-8 line framing across chunk boundaries", async () => {
     const encoded = new TextEncoder().encode(
-      '{"protocol_version":1,"type":"health"}\r\n{"protocol_version":1,"type":"shutdown"}\n',
+      '{"protocol_version":2,"type":"health"}\r\n{"protocol_version":2,"type":"shutdown"}\n',
     );
     const input = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -119,8 +149,8 @@ describe("sidecar protocol", () => {
     for await (const line of (await import("../src/protocol.js")).readProtocolLines(input)) lines.push(line);
 
     expect(lines).toEqual([
-      '{"protocol_version":1,"type":"health"}',
-      '{"protocol_version":1,"type":"shutdown"}',
+      '{"protocol_version":2,"type":"health"}',
+      '{"protocol_version":2,"type":"shutdown"}',
     ]);
   });
 });

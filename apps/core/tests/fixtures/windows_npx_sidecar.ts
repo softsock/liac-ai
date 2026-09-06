@@ -9,7 +9,7 @@ function writeFrame(frame: Record<string, unknown>): void {
 }
 
 writeFrame({
-  protocol_version: 1,
+  protocol_version: 2,
   type: "ready",
   provider: "openai-codex",
   model_id: "gpt-5.6-luna",
@@ -32,14 +32,14 @@ for await (const chunk of Bun.stdin.stream()) {
     };
     if (command.type === "generate" && command.generation_id && command.epoch !== undefined) {
       writeFrame({
-        protocol_version: 1,
+        protocol_version: 2,
         type: "accepted",
         generation_id: command.generation_id,
         epoch: command.epoch,
       });
       const delta = encoder.encode("WINDOWS_CONTAINMENT_PROBE");
       writeFrame({
-        protocol_version: 1,
+        protocol_version: 2,
         type: "text_delta",
         generation_id: command.generation_id,
         epoch: command.epoch,

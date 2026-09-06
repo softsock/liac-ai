@@ -114,11 +114,11 @@ class BlocksAfterOutput implements ProtocolOutput {
 }
 
 function command(type: "generate", generationId: string, epoch: number, prompt: string): string {
-  return JSON.stringify({ protocol_version: 1, type, generation_id: generationId, epoch, prompt });
+  return JSON.stringify({ protocol_version: 2, type, generation_id: generationId, epoch, prompt });
 }
 
 function shutdownCommand(): string {
-  return JSON.stringify({ protocol_version: 1, type: "shutdown" });
+  return JSON.stringify({ protocol_version: 2, type: "shutdown" });
 }
 
 const openHandles: Array<{ close: () => Promise<void> }> = [];
@@ -286,7 +286,7 @@ describe("adversarial lifecycle boundaries", () => {
     expect(performance.now() - startedAt).toBeLessThan(1_000);
     expect(output.chunks).toHaveLength(3);
     expect(JSON.parse(output.chunks[2]) as Record<string, unknown>).toMatchObject({
-      protocol_version: 1,
+      protocol_version: 2,
       type: "completed",
       generation_id: "blocked-terminal",
       epoch: 1,

@@ -18,7 +18,7 @@ def emit(value: dict[str, object]) -> None:
 
 def generation_event(event_type: str, generation_id: object, epoch: object) -> dict[str, object]:
     return {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "type": event_type,
         "generation_id": generation_id,
         "epoch": epoch,
@@ -29,7 +29,7 @@ def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "race"
     emit(
         {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "type": "ready",
             "provider": "fixture",
             "model_id": "fixture-model",
@@ -57,7 +57,7 @@ def main() -> int:
                 emit(generation_event("completed", generation_id, epoch))
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "failed",
                         "code": "cleanup_error",
                     }
@@ -83,7 +83,7 @@ def main() -> int:
             else:
                 emit(generation_event("cancelled", command["generation_id"], command["epoch"]))
         elif command_type == "shutdown":
-            emit({"protocol_version": 1, "type": "shutdown"})
+            emit({"protocol_version": 2, "type": "shutdown"})
             return 0
     return 0
 

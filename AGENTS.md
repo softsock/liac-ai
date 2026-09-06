@@ -54,7 +54,7 @@ Stage only task-owned files.
 
 Do not report a validation step as passing unless it was actually executed. Use the repository's authoritative validation commands once they exist; do not substitute guessed tooling. Reports should distinguish verified results from remaining uncertainty.
 
-The model-sidecar protocol host reserves stdout for version-one JSONL frames. Human-readable diagnostics must use stderr so they cannot corrupt protocol framing.
+The model-sidecar protocol host reserves stdout for version-two JSONL frames. Human-readable diagnostics must use stderr so they cannot corrupt protocol framing.
 
 ## Maintaining This File
 

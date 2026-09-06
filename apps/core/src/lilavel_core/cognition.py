@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from .sidecar_protocol import MAX_GUIDANCE_BLOCKS, MAX_GUIDANCE_BYTES, ProtocolError
+
 Aim = Literal[
     "answer",
     "acknowledge",
@@ -41,7 +43,7 @@ class ResponseDisposition:
     directness: Level = "normal"
     desired_length: Level = "normal"
     humor_allowed: bool = False
-    question_policy: Literal["avoid", "必要", "invite"] = "avoid"
+    question_policy: Literal["avoid", "required", "invite"] = "avoid"
     initiative: Level = "normal"
 
 
@@ -74,4 +76,11 @@ def compile_guidance(
                 )
             )
         )
-    return tuple(blocks)
+    result = tuple(blocks)
+    if len(result) > MAX_GUIDANCE_BLOCKS or any(not block.strip() for block in result):
+        raise ProtocolError("invalid_field")
+    if len(set(result)) != len(result):
+        raise ProtocolError("invalid_field")
+    if sum(len(block.encode("utf-8")) for block in result) > MAX_GUIDANCE_BYTES:
+        raise ProtocolError("invalid_field")
+    return result

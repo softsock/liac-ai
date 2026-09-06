@@ -1,7 +1,11 @@
 """Core integration coverage for the provider-neutral structured request."""
 
+import os
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 from lilavel_core import (
     ContextMessage,
@@ -14,6 +18,7 @@ from lilavel_core import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "structured_sidecar.py"
+BUN_FIXTURE = Path(__file__).parent / "fixtures" / "guided_sidecar.ts"
 
 
 def runtime() -> ModelRuntime:
@@ -42,6 +47,44 @@ def test_core_sends_structured_context_and_preserves_order() -> None:
             TextDelta,
             GenerationCompleted,
         ]
+    finally:
+        model.shutdown()
+
+
+def test_core_protocol_round_trip_preserves_trusted_guidance() -> None:
+    model = runtime()
+    model.start()
+    try:
+        handle = model.generate(
+            ModelRequest(
+                messages=(ContextMessage("user", "hello"),),
+                system_prompt=("trusted identity",),
+            )
+        )
+        assert handle.wait(2.0).text == "structured-guided"
+    finally:
+        model.shutdown()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the pinned Windows launcher is not exercised here")
+def test_core_to_bun_protocol_round_trip_preserves_trusted_guidance() -> None:
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if npx is None:
+        pytest.skip("npx is required for the Core-to-Bun protocol probe")
+    model = ModelRuntime(
+        command=(npx, "--yes", "bun@1.4.0", "run", str(BUN_FIXTURE)),
+        sidecar_dir=BUN_FIXTURE.parent,
+        startup_timeout=20.0,
+    )
+    model.start()
+    try:
+        handle = model.generate(
+            ModelRequest(
+                messages=(ContextMessage("user", "hello"),),
+                system_prompt=("trusted identity",),
+            )
+        )
+        assert handle.wait(5.0).text == "GUIDANCE_WIRE_OK"
     finally:
         model.shutdown()
 

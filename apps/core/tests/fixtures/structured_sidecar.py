@@ -28,10 +28,24 @@ def valid_messages(value: object) -> TypeGuard[list[dict[str, object]]]:
     return True
 
 
+def valid_guidance(value: object) -> TypeGuard[list[str]]:
+    if not isinstance(value, list):
+        return False
+    raw_blocks = cast(list[object], value)
+    if len(raw_blocks) > 32:
+        return False
+    blocks = [block for block in raw_blocks if isinstance(block, str)]
+    return (
+        len(blocks) == len(raw_blocks)
+        and all(block.strip() for block in blocks)
+        and len(set(blocks)) == len(blocks)
+    )
+
+
 def main() -> int:
     emit(
         {
-            "protocol_version": 1,
+            "protocol_version": 2,
             "type": "ready",
             "provider": "fixture",
             "model_id": "structured-fixture",
@@ -46,10 +60,13 @@ def main() -> int:
             generation_id = command["generation_id"]
             epoch = command["epoch"]
             raw_messages = command.get("messages")
-            if not valid_messages(raw_messages):
+            raw_guidance = command.get("system_prompt")
+            if not valid_messages(raw_messages) or (
+                raw_guidance is not None and not valid_guidance(raw_guidance)
+            ):
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "failed",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -61,7 +78,7 @@ def main() -> int:
             last_text = messages[-1]["text"]
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "accepted",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -71,7 +88,7 @@ def main() -> int:
                 active = (generation_id, epoch)
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "text_delta",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -79,10 +96,13 @@ def main() -> int:
                     }
                 )
                 continue
-            response = "structured-continuity" if len(messages) == 3 else "structured-recovered"
+            if raw_guidance == ["trusted identity"]:
+                response = "structured-guided"
+            else:
+                response = "structured-continuity" if len(messages) == 3 else "structured-recovered"
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "text_delta",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -91,7 +111,7 @@ def main() -> int:
             )
             emit(
                 {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "type": "completed",
                     "generation_id": generation_id,
                     "epoch": epoch,
@@ -102,7 +122,7 @@ def main() -> int:
                 generation_id, epoch = active
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "cancelled",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -110,7 +130,7 @@ def main() -> int:
                 )
                 emit(
                     {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "type": "text_delta",
                         "generation_id": generation_id,
                         "epoch": epoch,
@@ -119,7 +139,7 @@ def main() -> int:
                 )
                 active = None
         elif command_type == "shutdown":
-            emit({"protocol_version": 1, "type": "shutdown"})
+            emit({"protocol_version": 2, "type": "shutdown"})
             return 0
     return 0
 

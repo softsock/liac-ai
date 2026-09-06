@@ -76,7 +76,7 @@ contract](apps/core/README.md) for lifecycle, settlement, and event-consumer
 semantics.
 
 The runtime uses UTF-8 newline-delimited JSON on the sidecar's stdin/stdout.
-Every frame has `protocol_version: 1`. Commands are `generate`, `cancel`,
+Every frame has `protocol_version: 2`. Commands are `generate`, `cancel`,
 `health`, and `shutdown`; sidecar events are `ready`, `accepted`, `text_delta`,
 `completed`, `cancelled`, `failed`, `health`, and `shutdown`. Generation-scoped
 frames carry both `generation_id` and `epoch`. Stdout is reserved for these

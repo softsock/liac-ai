@@ -74,9 +74,9 @@ class CaptureOutput implements ProtocolOutput {
 
 function command(type: "generate" | "cancel", generationId: string, epoch: number, prompt?: string): string {
   if (type === "generate") {
-    return JSON.stringify({ protocol_version: 1, type, generation_id: generationId, epoch, prompt });
+    return JSON.stringify({ protocol_version: 2, type, generation_id: generationId, epoch, prompt });
   }
-  return JSON.stringify({ protocol_version: 1, type, generation_id: generationId, epoch });
+  return JSON.stringify({ protocol_version: 2, type, generation_id: generationId, epoch });
 }
 
 test("protocol server performs ready, genuine streaming, cancellation, recovery, and shutdown", async () => {
@@ -115,7 +115,7 @@ test("protocol server performs ready, genuine streaming, cancellation, recovery,
             input.push(command("generate", "recovery", (event.epoch ?? 0) + 1, "recovery"));
           }
           if (event.type === "completed" && event.requestId === "recovery") {
-            input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+            input.push(JSON.stringify({ protocol_version: 2, type: "shutdown" }));
           }
         },
       }),
@@ -164,14 +164,14 @@ test("protocol server forwards structured context to the provider adapter", asyn
         }),
         onEvent: (event) => {
           onEvent(event);
-          if (event.type === "completed") input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+          if (event.type === "completed") input.push(JSON.stringify({ protocol_version: 2, type: "shutdown" }));
         },
       }),
   });
 
   input.push(
     JSON.stringify({
-      protocol_version: 1,
+      protocol_version: 2,
       type: "generate",
       generation_id: "structured",
       epoch: 1,
@@ -214,8 +214,8 @@ test("protocol server reports malformed input without hanging or corrupting stdo
   const exitCode = await server.run();
   expect(exitCode).toBe(1);
   expect(output.frames()).toEqual([
-    { protocol_version: 1, type: "ready", provider: "openai-codex", model_id: "gpt-5.6-luna", api: "openai-codex-responses" },
-    { protocol_version: 1, type: "failed", code: "protocol_error" },
+    { protocol_version: 2, type: "ready", provider: "openai-codex", model_id: "gpt-5.6-luna", api: "openai-codex-responses" },
+    { protocol_version: 2, type: "failed", code: "protocol_error" },
   ]);
 });
 
@@ -233,7 +233,7 @@ test("protocol server fails startup when the sidecar omits the ready handshake",
   });
 
   expect(await server.run()).toBe(1);
-  expect(output.frames()).toEqual([{ protocol_version: 1, type: "failed", code: "startup_error" }]);
+  expect(output.frames()).toEqual([{ protocol_version: 2, type: "failed", code: "startup_error" }]);
 });
 
 test("protocol server emits one cleanup failure and exits when cancellation poisons the sidecar", async () => {
@@ -275,7 +275,7 @@ test("protocol server emits one cleanup failure and exits when cancellation pois
 
   expect(exitCode).toBe(1);
   expect(frames.filter((frame) => frame.type === "failed")).toEqual([
-    { protocol_version: 1, type: "failed", generation_id: "poisoned", epoch: 1, code: "cleanup_timeout" },
+    { protocol_version: 2, type: "failed", generation_id: "poisoned", epoch: 1, code: "cleanup_timeout" },
   ]);
   expect(frames.filter((frame) => frame.type === "cancelled")).toHaveLength(0);
 });
@@ -299,14 +299,14 @@ test("defers output-limit terminal failure until provider cleanup completes", as
             yield providerEvent("text_delta", "x".repeat(PROTOCOL_LIMITS.maxResponseBytes));
             yield providerEvent("text_delta", "overflow");
           } finally {
-            input.push(JSON.stringify({ protocol_version: 1, type: "health" }));
+            input.push(JSON.stringify({ protocol_version: 2, type: "health" }));
             await cleanupGate;
           }
         }),
         onEvent: (event) => {
           onEvent(event);
           if (event.type === "cancelled") {
-            input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+            input.push(JSON.stringify({ protocol_version: 2, type: "shutdown" }));
           }
         },
       }),
@@ -322,10 +322,10 @@ test("defers output-limit terminal failure until provider cleanup completes", as
 
   expect(exitCode).toBe(0);
   expect(healthIndex).toBeGreaterThan(-1);
-  expect(frames[healthIndex]).toMatchObject({ protocol_version: 1, type: "health", state: "busy" });
+  expect(frames[healthIndex]).toMatchObject({ protocol_version: 2, type: "health", state: "busy" });
   expect(failedIndex).toBeGreaterThan(-1);
   expect(frames.filter((frame) => frame.type === "failed")).toEqual([
-    { protocol_version: 1, type: "failed", generation_id: "limited", epoch: 1, code: "output_limit" },
+    { protocol_version: 2, type: "failed", generation_id: "limited", epoch: 1, code: "output_limit" },
   ]);
   expect(frames.filter((frame) => frame.type === "cancelled")).toHaveLength(0);
 });
@@ -360,14 +360,14 @@ test("settles an active generation before forced shutdown timeout", async () => 
   });
 
   input.push(command("generate", "shutdown-race", 1, "hang"));
-  input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+  input.push(JSON.stringify({ protocol_version: 2, type: "shutdown" }));
   const exitCode = await server.run();
   const frames = output.frames();
 
   expect(exitCode).toBe(1);
   expect(exitCalls).toEqual([1]);
   expect(frames.filter((frame) => frame.type === "failed")).toEqual([
-    { protocol_version: 1, type: "failed", generation_id: "shutdown-race", epoch: 1, code: "shutdown_timeout" },
+    { protocol_version: 2, type: "failed", generation_id: "shutdown-race", epoch: 1, code: "shutdown_timeout" },
   ]);
   expect(frames.filter((frame) => frame.type === "shutdown")).toHaveLength(0);
 });
@@ -400,14 +400,14 @@ test("does not acknowledge clean shutdown after cleanup poisons the sidecar", as
   });
 
   input.push(command("generate", "cleanup-shutdown", 1, "hang"));
-  input.push(JSON.stringify({ protocol_version: 1, type: "shutdown" }));
+  input.push(JSON.stringify({ protocol_version: 2, type: "shutdown" }));
   const exitCode = await server.run();
   const frames = output.frames();
 
   expect(exitCode).toBe(1);
   expect(frames.filter((frame) => frame.type === "failed")).toEqual([
     {
-      protocol_version: 1,
+      protocol_version: 2,
       type: "failed",
       generation_id: "cleanup-shutdown",
       epoch: 1,

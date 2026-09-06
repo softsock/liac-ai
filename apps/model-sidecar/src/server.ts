@@ -2,6 +2,7 @@ import { createModelSidecar, type GenerationHandle, type ModelSidecar, type Side
 import {
   encodeEvent,
   parseCommand,
+  PROTOCOL_VERSION,
   PROTOCOL_LIMITS,
   readProtocolLines,
   type ProtocolCommand,
@@ -244,7 +245,7 @@ export class ProtocolServer {
       case "shutdown":
         this.#closing = true;
         if (!(await this.#closeSidecar()) || this.#fatal) return false;
-        this.#writeEvent({ protocol_version: 1, type: "shutdown" });
+        this.#writeEvent({ protocol_version: PROTOCOL_VERSION, type: "shutdown" });
         await this.#writer.flush().catch(() => undefined);
         return false;
     }
@@ -288,7 +289,9 @@ export class ProtocolServer {
         ? command.system_prompt?.length
           ? { messages: [{ role: "user" as const, text: command.prompt }], system_prompt: command.system_prompt }
           : command.prompt
-        : { messages: command.messages, system_prompt: command.system_prompt };
+        : command.system_prompt?.length
+          ? { messages: command.messages, system_prompt: command.system_prompt }
+          : { messages: command.messages };
       const handle = this.#sidecar.generate(input, {
         generationId: command.generation_id,
         epoch: command.epoch,
@@ -320,8 +323,8 @@ export class ProtocolServer {
         active.terminal = true;
         this.#writeEvent(
           result.status === "completed"
-            ? { protocol_version: 1, type: "completed", generation_id: active.generationId, epoch: active.epoch }
-            : { protocol_version: 1, type: "cancelled", generation_id: active.generationId, epoch: active.epoch },
+            ? { protocol_version: PROTOCOL_VERSION, type: "completed", generation_id: active.generationId, epoch: active.epoch }
+            : { protocol_version: PROTOCOL_VERSION, type: "cancelled", generation_id: active.generationId, epoch: active.epoch },
         );
       }
     } catch {
@@ -339,7 +342,7 @@ export class ProtocolServer {
       case "ready":
         this.#readySeen = true;
         this.#writeEvent({
-          protocol_version: 1,
+          protocol_version: PROTOCOL_VERSION,
           type: "ready",
           provider: event.metadata.provider ?? "openai-codex",
           model_id: event.metadata.modelId ?? "gpt-5.6-luna",
@@ -350,7 +353,7 @@ export class ProtocolServer {
         const active = this.#active;
         if (active && this.#matches(active, event) && !active.terminal) {
           this.#writeEvent({
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             type: "accepted",
             generation_id: active.generationId,
             epoch: active.epoch,
@@ -374,7 +377,7 @@ export class ProtocolServer {
         active.responseBytes += deltaBytes;
         for (const delta of splitDelta(event.delta)) {
           this.#writeEvent({
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             type: "text_delta",
             generation_id: active.generationId,
             epoch: active.epoch,
@@ -390,7 +393,7 @@ export class ProtocolServer {
         if (active.outputLimitExceeded) this.#writeFailed(active.generationId, active.epoch, "output_limit");
         else {
           this.#writeEvent({
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             type: "completed",
             generation_id: active.generationId,
             epoch: active.epoch,
@@ -405,7 +408,7 @@ export class ProtocolServer {
         if (active.outputLimitExceeded) this.#writeFailed(active.generationId, active.epoch, "output_limit");
         else {
           this.#writeEvent({
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             type: "cancelled",
             generation_id: active.generationId,
             epoch: active.epoch,
@@ -447,14 +450,14 @@ export class ProtocolServer {
 
   #writeHealth(): void {
     const state = this.#sidecar.state === "new" ? "starting" : this.#sidecar.state;
-    this.#writeEvent({ protocol_version: 1, type: "health", state });
+    this.#writeEvent({ protocol_version: PROTOCOL_VERSION, type: "health", state });
   }
 
   #writeFailed(generationId: string | undefined, epoch: number | undefined, code: ProtocolErrorCode): void {
     if (generationId !== undefined && epoch !== undefined) {
-      this.#writeEvent({ protocol_version: 1, type: "failed", generation_id: generationId, epoch, code });
+      this.#writeEvent({ protocol_version: PROTOCOL_VERSION, type: "failed", generation_id: generationId, epoch, code });
     } else {
-      this.#writeEvent({ protocol_version: 1, type: "failed", code });
+      this.#writeEvent({ protocol_version: PROTOCOL_VERSION, type: "failed", code });
     }
   }
 

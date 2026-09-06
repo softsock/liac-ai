@@ -15,6 +15,7 @@ import {
   validateContextMessages,
   validateEpoch,
   validateGenerationId,
+  PROTOCOL_LIMITS,
   type ContextMessage,
   validateSystemPrompt,
 } from "./protocol.js";
@@ -41,8 +42,9 @@ export type StreamSimple = (
   options?: SimpleStreamOptions,
 ) => AsyncIterable<AssistantMessageEvent>;
 
-export type ModelInput = string | readonly ContextMessage[] | { messages: readonly ContextMessage[]; system_prompt?: readonly string[] };
-function isStructuredInput(input: ModelInput): input is { messages: readonly ContextMessage[]; system_prompt?: readonly string[] } {
+type StructuredModelInput = { messages: readonly ContextMessage[]; system_prompt?: readonly string[] };
+export type ModelInput = string | readonly ContextMessage[] | StructuredModelInput;
+function isStructuredInput(input: ModelInput): input is StructuredModelInput {
   return typeof input !== "string" && !Array.isArray(input) && "messages" in input;
 }
 
@@ -292,8 +294,11 @@ export class ModelSidecar {
         request = input;
       } else if (isStructuredInput(input)) {
         validateContextMessages(input.messages);
-        if (input.system_prompt) validateSystemPrompt(input.system_prompt);
-        request = { messages: input.messages.map((message) => ({ role: message.role, text: message.text })), system_prompt: input.system_prompt };
+        if ("system_prompt" in input) validateSystemPrompt(input.system_prompt);
+        request = {
+          messages: input.messages.map((message) => ({ role: message.role, text: message.text })),
+          ...(input.system_prompt === undefined ? {} : { system_prompt: input.system_prompt }),
+        };
       }
     } catch {
       return this.#rejectedHandle(requestId, epoch, "invalid_request");
@@ -397,7 +402,9 @@ export class ModelSidecar {
         typeof input === "string"
           ? { messages: [{ role: "user", content: input, timestamp: Date.now() }] }
           : toPiAiContext(isStructuredInput(input) ? input.messages : input);
-      if (isStructuredInput(input) && input.system_prompt?.length) context.systemPrompt = [...input.system_prompt];
+      if (isStructuredInput(input) && input.system_prompt !== undefined) {
+        context.systemPrompt = [...input.system_prompt];
+      }
       const apiKey: ApiKeyResolver = auth.resolver(PROVIDER, {
         sessionId: diagnostics.requestId,
         modelId: model.id,
@@ -427,10 +434,14 @@ export class ModelSidecar {
         }
         if (received.type === "text_delta") {
           if (received.delta.length > 0) this.#mark(diagnostics, "firstNonEmptyDelta");
-          if (new TextEncoder().encode(text + received.delta).byteLength > 4 * 1024 * 1024) {
+          const nextText = text + received.delta;
+          if (new TextEncoder().encode(nextText).byteLength > PROTOCOL_LIMITS.maxResponseBytes) {
+            // Let the protocol server observe the overflowing delta so it can
+            // emit one output_limit terminal frame and cancel provider work.
+            this.#emit("text_delta", diagnostics, { delta: received.delta });
             throw new SidecarError("response_limit");
           }
-          text += received.delta;
+          text = nextText;
           this.#emit("text_delta", diagnostics, { delta: received.delta });
         } else if (received.type === "error") {
           if (received.reason === "aborted" || controller.signal.aborted) throw new SidecarError("cancelled");
@@ -470,6 +481,10 @@ export class ModelSidecar {
       return result;
     }
     const terminalFailure = failure ?? new SidecarError("provider_error");
+    if (terminalFailure.code === "response_limit") {
+      this.#mark(diagnostics, "cancellation");
+      this.#emit("cancelled", diagnostics, {});
+    }
     this.#emit("error", diagnostics, { code: terminalFailure.code });
     throw terminalFailure;
   }
