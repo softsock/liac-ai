@@ -577,5 +577,29 @@ def test_conversation_core_integrates_with_existing_model_runtime_structured_fix
             ContextMessage("user", "second turn"),
             ContextMessage("assistant", "structured-continuity"),
         )
+        semantic_evidence = core.runtime_evidence()
+        physical_evidence = model.physical_evidence()
+        for run in (first, second):
+            bound = next(
+                record
+                for record in semantic_evidence
+                if record.run_id == run.run_id and record.kind == "generation_bound"
+            )
+            physical = [
+                record
+                for record in physical_evidence
+                if record.generation_id == bound.generation_id and record.epoch == bound.epoch
+            ]
+            assert [
+                record.protocol_event for record in physical if record.kind == "protocol_event"
+            ] == [
+                "accepted",
+                "text_delta",
+                "completed",
+            ]
+            assert physical[-1].kind == "generation_terminal"
+            assert physical[-1].result == "completed"
+        assert "structured-recovered" not in repr(physical_evidence)
+        assert "structured-continuity" not in repr(physical_evidence)
     finally:
         model.shutdown()
