@@ -2,11 +2,17 @@
 
 Lilavel is a communication-first AI system. Natural, responsive text interaction is its primary product priority.
 
+## Product direction
+
+Lilavel is intended to evolve into a real-time autonomous AI character / AI streamer, broadly in the product space exemplified by Neuro-Sama. The current phase establishes the conversational/personality foundation through Discord: it builds and validates the runtime and boundaries needed before the final personality/character phase begins. Final personality/character behavior is not implemented yet. Streamer-specific capabilities are future scope unless they are separately implemented and documented; this direction does not by itself create current requirements.
+
 ## Project orientation
 
 - [`AGENTS.md`](AGENTS.md) — project-specific operating contract.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — established ownership boundaries and interaction invariants.
 - [`docs/STACK.md`](docs/STACK.md) — selected runtime and provider-layer technologies.
+- [`docs/VALIDATION.md`](docs/VALIDATION.md) — operational checks and validation result semantics.
+- [`docs/decisions/`](docs/decisions/) — current architectural decisions and their evidence.
 - [`apps/core/README.md`](apps/core/README.md) — current Core runtime and streaming-consumer contract.
 
 ## Repository foundation (P0.1 historical)

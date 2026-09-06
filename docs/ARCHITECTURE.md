@@ -1,12 +1,12 @@
 # Architecture
 
-This document records established boundaries only.
+This document records established current boundaries only. Lilavel is intended to become a real-time autonomous AI character / AI streamer, but streamer-specific capabilities are outside the implemented architecture unless separately documented. The current architecture is the conversational foundation for that later work.
 
 ## Semantic ownership
 
-Lilavel Core owns semantic conversation state, conversation history, memory, and character/personality behavior. These are product semantics and remain inside Lilavel.
+Lilavel Core owns the implemented semantic conversation state and boundaries: canonical conversation history, context composition, generation lifecycle, and local canonical/evidence persistence. Memory, retrieval, reflection, memory injection, and final character/personality behavior are not implemented in the current slice. See [ADR-001](decisions/ADR-001-core-owns-canonical-conversation-state.md) and [ADR-005](decisions/ADR-005-canonical-history-provenance.md).
 
-Provider and sidecar code may own authentication, network, and transport state. That state must not silently become Lilavel's semantic conversation memory, and character behavior must not be delegated to the provider transport.
+Provider and sidecar code may own authentication, network, and transport state. That state must not silently become Lilavel's semantic conversation memory, and semantic behavior is not delegated to the provider transport.
 
 `ConversationCore` is the narrow semantic layer above `ModelRuntime`. It
 accepts each user message into canonical history immediately. A
@@ -32,13 +32,15 @@ message and its raw evidence record in one SQLite transaction. Cancelled,
 superseded, failed, stale, and partial assistant output has no persistence
 path. A durable caller supplies an explicit provider-neutral scope ID and
 reopens the same SQLite database; the Discord edge does not supply or own this
-mapping in this slice. The transaction is the assistant commit point: a crash
-before it leaves only the accepted user, while a crash after it can leave a
-durable assistant whose delivery acknowledgement was not observed.
+mapping in this slice. By default, `ConversationCore` uses SQLite `:memory:`;
+restart-safe history is therefore not the default. The transaction is the
+assistant commit point: a crash before it leaves only the accepted user, while
+a crash after it can leave a durable assistant whose delivery acknowledgement
+was not observed.
 
 ## Model transport
 
-A small TypeScript/Bun sidecar is intended for model transport where it is needed. It is a transport boundary, not a second conversational runtime.
+A small TypeScript/Bun sidecar is intended for model transport where it is needed. It is a transport boundary, not a second conversational runtime. See [ADR-002](decisions/ADR-002-provider-sidecar-transport-boundary.md).
 
 The P0.2 provider layer selects `openai-codex/gpt-5.6-luna` from the pinned
 `@oh-my-pi/pi-catalog` and invokes it directly through `@oh-my-pi/pi-ai`'s
@@ -52,7 +54,8 @@ Lilavel's conversational runtime, and MCP/tools are not part of this boundary.
 persistent sidecar process, waits for a version-two `ready` frame, sends one
 small prompt request at a time, and receives UTF-8 newline-delimited JSON
 events. Core creates and tracks each generation's `generation_id` and `epoch`;
-the sidecar echoes both values on accepted, delta, and terminal frames.
+the sidecar echoes both values on accepted, delta, and terminal frames. See
+[ADR-003](decisions/ADR-003-core-generation-lifecycle.md).
 
 Core admission and teardown are serialized. Shutdown closes admission under
 the same lock used by generation admission, then moves through
@@ -140,7 +143,8 @@ the same descendant guarantee.
 
 The initial Discord integration lives in `apps/discord-edge` and depends on
 `lilavel-core`; Core has no Discord or `discord.py` dependency. This edge is a
-transport/presentation adapter only:
+transport/presentation adapter only. See
+[ADR-004](decisions/ADR-004-discord-transport-presentation-edge.md):
 
 ```text
 Discord MESSAGE_CREATE (one-to-one DM)
