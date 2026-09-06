@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from queue import Queue
 from threading import Event, Lock, RLock, Thread
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 from uuid import uuid4
 
 from .persistence import (
@@ -41,6 +42,7 @@ class RuntimeGeneration(Protocol):
     """The small generation surface consumed by ``ConversationRun``."""
 
     generation_id: str
+    epoch: int
 
     def events(self) -> Iterator[GenerationEvent]:
         """Yield the runtime's correlated generation events."""
@@ -74,8 +76,167 @@ class FullHistoryContextComposer:
         return history
 
 
+RUNTIME_EVIDENCE_CAPACITY: Final = 256
+
+type RuntimeEvidenceKind = Literal[
+    "turn_accepted",
+    "generation_bound",
+    "cancel_requested",
+    "delta_discarded",
+    "generation_terminal",
+    "assistant_commit",
+    "run_terminal",
+]
+type RuntimeEvidenceResult = Literal[
+    "completed",
+    "cancelled",
+    "superseded",
+    "failed",
+    "committed",
+]
+type RuntimeEvidenceReason = Literal[
+    "cancelled",
+    "superseded",
+    "not_current",
+    "settled",
+    "context",
+    "runtime",
+    "runtime_cancel",
+    "persistence",
+    "invalid_result",
+    "generation_exhausted",
+    "semantic",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEvidenceRecord:
+    """Safe, ephemeral evidence for one Core conversation lifecycle fact.
+
+    ``sequence`` is the authoritative in-trace ordering primitive.  The
+    record intentionally contains only Core-owned IDs, safe statuses/codes,
+    and aggregate counts; it never contains message or provider payloads.
+    """
+
+    sequence: int
+    kind: RuntimeEvidenceKind
+    scope_id: str
+    run_id: str
+    user_message_id: str
+    generation_id: str | None = None
+    epoch: int | None = None
+    assistant_message_id: str | None = None
+    result: RuntimeEvidenceResult | None = None
+    reason: RuntimeEvidenceReason | None = None
+    failure_code: str | None = None
+    discarded_count: int = 0
+    discarded_bytes: int = 0
+
+
+class _RuntimeEvidenceTrace:
+    """Bounded Core-owned storage for immutable runtime evidence snapshots."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("runtime evidence capacity must be positive")
+        self._records: deque[RuntimeEvidenceRecord] = deque(maxlen=capacity)
+        self._next_sequence = 1
+        self._discarded: dict[tuple[str, str, int, RuntimeEvidenceReason], int] = {}
+
+    def append(
+        self,
+        *,
+        kind: RuntimeEvidenceKind,
+        scope_id: str,
+        run_id: str,
+        user_message_id: str,
+        generation_id: str | None = None,
+        epoch: int | None = None,
+        assistant_message_id: str | None = None,
+        result: RuntimeEvidenceResult | None = None,
+        reason: RuntimeEvidenceReason | None = None,
+        failure_code: str | None = None,
+    ) -> None:
+        record = RuntimeEvidenceRecord(
+            sequence=self._next_sequence,
+            kind=kind,
+            scope_id=scope_id,
+            run_id=run_id,
+            user_message_id=user_message_id,
+            generation_id=generation_id,
+            epoch=epoch,
+            assistant_message_id=assistant_message_id,
+            result=result,
+            reason=reason,
+            failure_code=failure_code,
+        )
+        self._next_sequence += 1
+        self._append_record(record)
+
+    def append_delta_discarded(
+        self,
+        *,
+        scope_id: str,
+        run_id: str,
+        user_message_id: str,
+        generation_id: str,
+        epoch: int,
+        reason: Literal["not_current", "cancelled", "settled"],
+        delta_bytes: int,
+    ) -> None:
+        key = (run_id, generation_id, epoch, reason)
+        sequence = self._discarded.get(key)
+        if sequence is not None:
+            for index, record in enumerate(self._records):
+                if record.sequence == sequence:
+                    self._records[index] = replace(
+                        record,
+                        discarded_count=record.discarded_count + 1,
+                        discarded_bytes=record.discarded_bytes + delta_bytes,
+                    )
+                    return
+            del self._discarded[key]
+
+        record = RuntimeEvidenceRecord(
+            sequence=self._next_sequence,
+            kind="delta_discarded",
+            scope_id=scope_id,
+            run_id=run_id,
+            user_message_id=user_message_id,
+            generation_id=generation_id,
+            epoch=epoch,
+            reason=reason,
+            discarded_count=1,
+            discarded_bytes=delta_bytes,
+        )
+        self._next_sequence += 1
+        self._append_record(record)
+        self._discarded[key] = record.sequence
+
+    def snapshot(self) -> tuple[RuntimeEvidenceRecord, ...]:
+        # Copy records as well as the container so even deliberate object-level
+        # mutation of a returned frozen dataclass cannot affect retained state.
+        return tuple(replace(record) for record in self._records)
+
+    def contains(self, *, kind: RuntimeEvidenceKind, run_id: str) -> bool:
+        return any(record.kind == kind and record.run_id == run_id for record in self._records)
+
+    def _append_record(self, record: RuntimeEvidenceRecord) -> None:
+        if len(self._records) == self._records.maxlen:
+            evicted = self._records[0]
+            if evicted.kind == "delta_discarded":
+                assert evicted.generation_id is not None
+                assert evicted.epoch is not None
+                assert evicted.reason in {"not_current", "cancelled", "settled"}
+                key = (evicted.run_id, evicted.generation_id, evicted.epoch, evicted.reason)
+                if self._discarded.get(key) == evicted.sequence:
+                    del self._discarded[key]
+        self._records.append(record)
+
+
 type ConversationCancellationReason = Literal["cancelled", "superseded"]
 type ConversationStatus = Literal["completed", "cancelled", "superseded", "failed"]
+type _DeltaAppendResult = Literal["accepted", "cancelled", "settled"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,11 +405,11 @@ class ConversationRun:
 
     def _send_runtime_cancel(self, generation: RuntimeGeneration) -> None:
         try:
-            self._core.runtime_cancel(generation.generation_id)
+            self._core.runtime_cancel(self, generation, self._cancel_reason_now())
         except Exception:
             # A failed physical cancellation is a failed semantic run.  The
             # runtime remains responsible for settling/poisoning its handle.
-            self._settle_failed()
+            self._settle_failed(reason="runtime_cancel")
 
     def _cancel_requested_now(self) -> bool:
         with self._lock:
@@ -265,6 +426,7 @@ class ConversationRun:
             if self._cancel_requested and not self._cancel_sent:
                 self._cancel_sent = True
                 send_cancel = True
+        self._core.record_generation_bound(self, generation)
         if send_cancel:
             self._send_runtime_cancel(generation)
 
@@ -282,7 +444,7 @@ class ConversationRun:
             except Exception:
                 # This includes the existing structured-context validation
                 # boundary.  The accepted user remains canonical.
-                self._settle_failed()
+                self._settle_failed(reason="context")
                 return
 
             if self._cancel_requested_now():
@@ -292,23 +454,34 @@ class ConversationRun:
             try:
                 generation = self._core.runtime_generate(request)
             except Exception:
-                self._settle_failed()
+                self._settle_failed(reason="runtime")
                 return
 
             self._set_runtime_generation(generation)
             self._consume_generation(generation)
         except Exception:
-            self._settle_failed()
+            self._settle_failed(reason="semantic")
 
     def _consume_generation(self, generation: RuntimeGeneration) -> None:
         for event in generation.events():
             if isinstance(event, TextDelta):
-                self._core.publish_delta(self, event.delta)
+                self._core.publish_delta(
+                    self,
+                    generation_id=event.generation_id,
+                    epoch=event.epoch,
+                    delta=event.delta,
+                )
             elif isinstance(event, GenerationCompleted):
+                self._core.record_generation_terminal(
+                    self,
+                    generation_id=generation.generation_id,
+                    epoch=generation.epoch,
+                    result="completed",
+                )
                 try:
                     commit = self._core.commit_assistant(self)
                 except PersistenceError as error:
-                    self._settle_failed(error)
+                    self._settle_failed(error, reason="persistence")
                     return
                 if commit == "committed":
                     self._settle_completed()
@@ -317,13 +490,26 @@ class ConversationRun:
                 elif commit == "cancelled":
                     self._settle_cancelled("cancelled")
                 else:
-                    self._settle_failed()
+                    self._settle_failed(reason="invalid_result")
                 return
             elif isinstance(event, GenerationCancelled):
+                self._core.record_generation_terminal(
+                    self,
+                    generation_id=generation.generation_id,
+                    epoch=generation.epoch,
+                    result="cancelled",
+                )
                 self._settle_cancelled(self._cancel_reason_now())
                 return
             elif isinstance(event, GenerationFailedEvent):
-                self._settle_failed()
+                self._core.record_generation_terminal(
+                    self,
+                    generation_id=generation.generation_id,
+                    epoch=generation.epoch,
+                    result="failed",
+                    failure_code=event.code,
+                )
+                self._settle_failed(reason="runtime", failure_code=event.code)
                 return
             # ``accepted`` is a runtime admission event, not conversation
             # semantics.  Other non-generation events are ignored likewise.
@@ -332,14 +518,17 @@ class ConversationRun:
         # Do not leave a semantic run hanging if a test/runtime substitute does
         # not honor that contract.
         if not self.settled:
-            self._settle_failed()
+            self._settle_failed(reason="generation_exhausted")
 
-    def append_delta_if_live(self, delta: str) -> None:
+    def append_delta_if_live(self, delta: str) -> _DeltaAppendResult:
         with self._lock:
-            if self._outcome is not None or self._cancel_requested:
-                return
+            if self._outcome is not None:
+                return "settled"
+            if self._cancel_requested:
+                return "cancelled"
             self._candidate_parts.append(delta)
             self._events.put(ConversationTextDelta(self.run_id, delta))
+            return "accepted"
 
     def _candidate_text(self) -> str:
         with self._lock:
@@ -360,20 +549,41 @@ class ConversationRun:
             ConversationCancelled(self.run_id, text, reason),
         )
 
-    def _settle_failed(self, error: PersistenceError | None = None) -> None:
+    def _settle_failed(
+        self,
+        error: PersistenceError | None = None,
+        *,
+        reason: RuntimeEvidenceReason | None = None,
+        failure_code: str | None = None,
+    ) -> None:
         text = self._candidate_text()
         self._settle(
             ConversationOutcome(self.run_id, "failed", text, error),
             ConversationFailed(self.run_id, text, error),
+            reason=reason,
+            failure_code=failure_code,
         )
 
-    def _settle(self, outcome: ConversationOutcome, event: ConversationEvent) -> None:
+    def _settle(
+        self,
+        outcome: ConversationOutcome,
+        event: ConversationEvent,
+        *,
+        reason: RuntimeEvidenceReason | None = None,
+        failure_code: str | None = None,
+    ) -> None:
         with self._lock:
             if self._outcome is not None:
                 return
             self._outcome = outcome
             self._events.put(event)
             self._settled_event.set()
+        self._core.record_run_terminal(
+            self,
+            outcome,
+            reason=reason,
+            failure_code=failure_code,
+        )
         self._core.run_settled(self)
 
     def reserve_assistant_commit(
@@ -417,11 +627,13 @@ class ConversationCore:
         trusted_guidance: Sequence[str] = (),
         scope_id: str | None = None,
         store: ConversationStore | None = None,
+        runtime_evidence_capacity: int = RUNTIME_EVIDENCE_CAPACITY,
     ) -> None:
         self._runtime = runtime
         self._composer = composer or FullHistoryContextComposer()
         self._trusted_guidance = tuple(trusted_guidance)
         self._lock = RLock()
+        self._runtime_evidence = _RuntimeEvidenceTrace(runtime_evidence_capacity)
         self._store = store or SQLiteConversationStore(":memory:")
         self._scope_id = validate_scope_id(scope_id if scope_id is not None else str(uuid4()))
         self._canonical_messages: list[CanonicalMessage] = list(
@@ -457,6 +669,16 @@ class ConversationCore:
 
         with self._lock:
             return self._store.load_evidence(self._scope_id)
+
+    def runtime_evidence(self) -> tuple[RuntimeEvidenceRecord, ...]:
+        """Return an immutable snapshot of bounded ephemeral Core diagnostics.
+
+        This is a runtime trace, not canonical history or durable provenance.
+        It is safe for tests and debugging to inspect after a run settles.
+        """
+
+        with self._lock:
+            return self._runtime_evidence.snapshot()
 
     @property
     def active_run(self) -> ConversationRun | None:
@@ -498,6 +720,12 @@ class ConversationCore:
                 str(uuid4()),
             )
             self._active = run
+            self._runtime_evidence.append(
+                kind="turn_accepted",
+                scope_id=self._scope_id,
+                run_id=run.run_id,
+                user_message_id=run.user_message_id,
+            )
 
         if previous is not None:
             previous.request_cancel("superseded")
@@ -512,11 +740,77 @@ class ConversationCore:
         composed = tuple(self._composer.compose(history))
         return ModelRequest(messages=composed, system_prompt=self._trusted_guidance)
 
-    def publish_delta(self, run: ConversationRun, delta: str) -> None:
+    def publish_delta(
+        self,
+        run: ConversationRun,
+        *,
+        generation_id: str,
+        epoch: int,
+        delta: str,
+    ) -> None:
         with self._lock:
             if self._active is not run:
+                self._runtime_evidence.append_delta_discarded(
+                    scope_id=self._scope_id,
+                    run_id=run.run_id,
+                    user_message_id=run.user_message_id,
+                    generation_id=generation_id,
+                    epoch=epoch,
+                    reason="not_current",
+                    delta_bytes=len(delta.encode("utf-8")),
+                )
                 return
-            run.append_delta_if_live(delta)
+            result = run.append_delta_if_live(delta)
+            if result != "accepted":
+                self._runtime_evidence.append_delta_discarded(
+                    scope_id=self._scope_id,
+                    run_id=run.run_id,
+                    user_message_id=run.user_message_id,
+                    generation_id=generation_id,
+                    epoch=epoch,
+                    reason=result,
+                    delta_bytes=len(delta.encode("utf-8")),
+                )
+
+    def record_generation_bound(self, run: ConversationRun, generation: RuntimeGeneration) -> None:
+        with self._lock:
+            self._record_generation_bound_locked(run, generation)
+
+    def _record_generation_bound_locked(
+        self, run: ConversationRun, generation: RuntimeGeneration
+    ) -> None:
+        if self._runtime_evidence.contains(kind="generation_bound", run_id=run.run_id):
+            return
+        self._runtime_evidence.append(
+            kind="generation_bound",
+            scope_id=self._scope_id,
+            run_id=run.run_id,
+            user_message_id=run.user_message_id,
+            generation_id=generation.generation_id,
+            epoch=generation.epoch,
+        )
+
+    def record_generation_terminal(
+        self,
+        run: ConversationRun,
+        *,
+        generation_id: str,
+        epoch: int,
+        result: Literal["completed", "cancelled", "failed"],
+        failure_code: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._runtime_evidence.append(
+                kind="generation_terminal",
+                scope_id=self._scope_id,
+                run_id=run.run_id,
+                user_message_id=run.user_message_id,
+                generation_id=generation_id,
+                epoch=epoch,
+                result=result,
+                reason="runtime" if result == "failed" else None,
+                failure_code=failure_code,
+            )
 
     def commit_assistant(self, run: ConversationRun) -> _CommitResult:
         with self._lock:
@@ -540,7 +834,34 @@ class ConversationCore:
                 raise
             self._canonical_messages.append(canonical_assistant)
             run.mark_assistant_committed()
+            self._runtime_evidence.append(
+                kind="assistant_commit",
+                scope_id=self._scope_id,
+                run_id=run.run_id,
+                user_message_id=run.user_message_id,
+                assistant_message_id=canonical_assistant.message_id,
+                result="committed",
+            )
             return "committed"
+
+    def record_run_terminal(
+        self,
+        run: ConversationRun,
+        outcome: ConversationOutcome,
+        *,
+        reason: RuntimeEvidenceReason | None,
+        failure_code: str | None,
+    ) -> None:
+        with self._lock:
+            self._runtime_evidence.append(
+                kind="run_terminal",
+                scope_id=self._scope_id,
+                run_id=run.run_id,
+                user_message_id=run.user_message_id,
+                result=outcome.status,
+                reason=reason,
+                failure_code=failure_code,
+            )
 
     def run_settled(self, run: ConversationRun) -> None:
         with self._lock:
@@ -552,7 +873,23 @@ class ConversationCore:
 
         return self._runtime.generate(request)
 
-    def runtime_cancel(self, generation_id: str) -> bool:
-        """Bridge one semantic cancellation to the configured runtime."""
+    def runtime_cancel(
+        self,
+        run: ConversationRun,
+        generation: RuntimeGeneration,
+        reason: ConversationCancellationReason,
+    ) -> bool:
+        """Record and bridge one physical cancellation request."""
 
-        return self._runtime.cancel(generation_id)
+        with self._lock:
+            self._record_generation_bound_locked(run, generation)
+            self._runtime_evidence.append(
+                kind="cancel_requested",
+                scope_id=self._scope_id,
+                run_id=run.run_id,
+                user_message_id=run.user_message_id,
+                generation_id=generation.generation_id,
+                epoch=generation.epoch,
+                reason=reason,
+            )
+        return self._runtime.cancel(generation.generation_id)

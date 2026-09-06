@@ -2,6 +2,7 @@
 
 from .cognition import IdentityCanon, ResponseDisposition, WorkingState, compile_guidance
 from .conversation import (
+    RUNTIME_EVIDENCE_CAPACITY,
     ConversationBusy,
     ConversationCancelled,
     ConversationCompleted,
@@ -15,6 +16,7 @@ from .conversation import (
     ConversationRuntime,
     ConversationTextDelta,
     FullHistoryContextComposer,
+    RuntimeEvidenceRecord,
     RuntimeGeneration,
 )
 from .persistence import (
@@ -108,6 +110,8 @@ __all__ = [
     "ProtocolViolation",
     "RuntimeBusy",
     "RuntimeGeneration",
+    "RuntimeEvidenceRecord",
+    "RUNTIME_EVIDENCE_CAPACITY",
     "RuntimeHealth",
     "RuntimeNotReady",
     "RuntimeStartTimeout",

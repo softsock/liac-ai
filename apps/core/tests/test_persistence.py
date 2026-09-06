@@ -468,4 +468,14 @@ def test_user_acceptance_and_assistant_completion_failures_are_typed() -> None:
     assert isinstance(outcome.error, PersistenceWriteError)
     assert assistant_core.history == (ContextMessage("user", "accepted despite later failure"),)
     assert assistant_store.load_evidence("assistant-failure")[0].provenance_kind == "canonical_user"
+    assistant_evidence = assistant_core.runtime_evidence()
+    assert [record.kind for record in assistant_evidence] == [
+        "turn_accepted",
+        "generation_bound",
+        "generation_terminal",
+        "run_terminal",
+    ]
+    assert assistant_evidence[-1].result == "failed"
+    assert assistant_evidence[-1].reason == "persistence"
+    assert not any(record.kind == "assistant_commit" for record in assistant_evidence)
     assistant_store.close()
