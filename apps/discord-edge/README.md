@@ -111,6 +111,42 @@ one runtime with each mapped Core session preserves that existing boundary and
 isolates histories; a future shared-runtime scheduler would be a separate
 design decision.
 
+## Thin deterministic JSONL scenario runner
+
+The repo-local runner exposes the existing deterministic evidence surfaces in
+one agent-facing stream. Run it from this package directory:
+
+```powershell
+uv run --locked python scripts/scenario_runner.py success
+uv run --locked python scripts/scenario_runner.py supersession
+```
+
+Supported scenarios are `success`, `supersession`, `sidecar-failure`,
+`malformed-frame`, and `discord-interruption`. They are offline: the first,
+third, and fourth use the committed Core fake-sidecar fixture through the real
+`ModelRuntime`; supersession and Discord interruption reuse the existing Core
+semantic test double and the production edge/presenter diagnostics. The
+successful and sidecar-failure scenarios join Core semantic evidence to
+physical generation evidence. The Discord scenario joins Core run IDs to the
+edge-local presenter flush, operation, HTTP request, and presentation outcome
+chain. The semantic-double scenarios intentionally have no physical evidence
+surface in their result.
+
+Every stdout line is one JSON object. The first line is scenario metadata,
+source evidence retains `core`, `physical`, and `discord` distinctions, and the
+last line is a deterministic runner result. It includes only Core-owned or
+edge-local correlation IDs, epochs, safe event categories, aggregate counts,
+and typed outcomes. Timestamps, request text, delta text, URLs, headers,
+bodies, exception messages, credentials, provider/session IDs, and Discord
+channel/message IDs are omitted. Unexpected runner failures use stderr and a
+nonzero exit; an expected sidecar failure is a successful scenario observation
+with a typed `failed` result.
+
+This is a bounded fixture/evidence surface, not a simulator, replay framework,
+durable evidence store, live provider/Discord check, restart proof, or M4D
+evaluation. It proves only the selected deterministic path and its recorded
+joins.
+
 ## Package checks
 
 ```powershell
