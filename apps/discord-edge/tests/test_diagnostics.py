@@ -9,17 +9,23 @@ from typing import Any, cast
 
 import discord
 import pytest
-from aiohttp.tracing import TraceRequestEndParams, TraceRequestStartParams
+from aiohttp.tracing import (
+    TraceRequestEndParams,
+    TraceRequestExceptionParams,
+    TraceRequestStartParams,
+)
 from multidict import CIMultiDict
 from yarl import URL
 
 from lilavel_discord_edge import (
+    DISCORD_HTTP_DIAGNOSTICS_ENV,
     DiscordDiagnostics,
     DiscordMessageSink,
     DiscordTextEdge,
     RateLimitObservation,
     ReplyPresenter,
     TransportMetrics,
+    diagnostics_from_environment,
 )
 
 
@@ -35,11 +41,15 @@ class FakeMessage:
     def __init__(self, content: str) -> None:
         self.content = content
         self.edits: list[str] = []
+        self.deleted = False
 
     async def edit(self, **kwargs: Any) -> FakeMessage:
         self.content = cast(str, kwargs["content"])
         self.edits.append(self.content)
         return self
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 class FakeChannel:
@@ -50,6 +60,115 @@ class FakeChannel:
         message = FakeMessage(cast(str, kwargs["content"]))
         self.messages.append(message)
         return message
+
+
+_ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
+    "operation_start": frozenset(
+        {"kind", "at_s", "operation", "operation_id", "presenter_flush_id"}
+    ),
+    "operation_return": frozenset(
+        {
+            "kind",
+            "at_s",
+            "operation",
+            "operation_id",
+            "presenter_flush_id",
+            "outcome",
+            "await_duration_s",
+            "http_response_count",
+            "last_http_response_at_s",
+            "post_response_gap_s",
+            "error_type",
+        }
+    ),
+    "http_request_start": frozenset(
+        {"kind", "at_s", "request_id", "operation", "operation_id", "presenter_flush_id"}
+    ),
+    "http_response": frozenset(
+        {
+            "kind",
+            "at_s",
+            "request_id",
+            "operation",
+            "operation_id",
+            "presenter_flush_id",
+            "response_duration_s",
+            "response_status",
+            "rate_limited",
+            "rate_limit_limit",
+            "rate_limit_remaining",
+            "rate_limit_reset_after_s",
+            "rate_limit_bucket_hash",
+            "retry_after_s",
+        }
+    ),
+    "http_request_exception": frozenset(
+        {
+            "kind",
+            "at_s",
+            "request_id",
+            "operation",
+            "operation_id",
+            "presenter_flush_id",
+            "duration_s",
+            "error_type",
+        }
+    ),
+    "presenter_flush_start": frozenset({"kind", "at_s", "flush_id", "chunk_count", "force"}),
+    "presenter_flush_return": frozenset(
+        {"kind", "at_s", "flush_id", "duration_s", "outcome", "error_type"}
+    ),
+    "semantic_selection": frozenset(
+        {
+            "kind",
+            "at_s",
+            "raw_chars",
+            "visible_chars",
+            "hidden_tail_chars",
+            "hidden_tail_age_s",
+            "lookahead_s",
+            "max_lookahead_s",
+            "boundary",
+            "preview_repaired",
+            "published",
+        }
+    ),
+}
+
+_AUTH_SENTINEL = "m3c3-auth-sentinel-do-not-emit"
+_MESSAGE_SENTINEL = "m3c3-message-sentinel-do-not-emit"
+_URL_SENTINEL = "m3c3-url-identifier-sentinel-do-not-emit"
+_MESSAGE_ID_SENTINEL = "m3c3-message-id-sentinel-do-not-emit"
+_PROVIDER_SENTINEL = "m3c3-provider-value-sentinel-do-not-emit"
+_BUCKET_SENTINEL = "m3c3-bucket-sentinel-do-not-emit"
+_RESPONSE_BODY_SENTINEL = "m3c3-response-body-sentinel-do-not-emit"
+_EXCEPTION_SENTINEL = "m3c3-exception-message-sentinel-do-not-emit"
+_SENSITIVE_SENTINELS = (
+    _AUTH_SENTINEL,
+    _MESSAGE_SENTINEL,
+    _URL_SENTINEL,
+    _MESSAGE_ID_SENTINEL,
+    _PROVIDER_SENTINEL,
+    _BUCKET_SENTINEL,
+    _RESPONSE_BODY_SENTINEL,
+    _EXCEPTION_SENTINEL,
+)
+
+
+def assert_only_allowlisted_fields(events: list[dict[str, object]]) -> None:
+    assert events
+    for event in events:
+        kind = event.get("kind")
+        assert isinstance(kind, str)
+        allowed = _ALLOWED_DIAGNOSTIC_FIELDS.get(kind)
+        assert allowed is not None, f"unexpected diagnostics event kind: {kind}"
+        assert set(event).issubset(allowed), f"unexpected fields for {kind}: {set(event) - allowed}"
+
+
+def assert_no_sensitive_sentinels(events: object) -> None:
+    serialized = json.dumps(events, ensure_ascii=False, sort_keys=True)
+    for sentinel in _SENSITIVE_SENTINELS:
+        assert sentinel not in serialized
 
 
 async def emit_http_response(
@@ -80,6 +199,35 @@ async def emit_http_response(
         cast(Any, None),
         context,
         TraceRequestEndParams(method, URL(url), CIMultiDict(), cast(Any, response)),
+    )
+
+
+async def emit_http_exception(
+    diagnostics: DiscordDiagnostics,
+    clock: FakeClock,
+    *,
+    method: str,
+    url: str,
+    exception: BaseException,
+    response_at: float,
+    request_headers: dict[str, str] | None = None,
+) -> None:
+    trace = diagnostics.trace_config
+    context = trace.trace_config_ctx()
+    await trace.on_request_start.send(
+        cast(Any, None),
+        context,
+        TraceRequestStartParams(
+            method,
+            URL(url),
+            CIMultiDict(request_headers or {}),
+        ),
+    )
+    clock.value = response_at
+    await trace.on_request_exception.send(
+        cast(Any, None),
+        context,
+        TraceRequestExceptionParams(method, URL(url), CIMultiDict(), exception),
     )
 
 
@@ -154,6 +302,7 @@ def test_enabled_trace_records_safe_post_patch_headers_and_post_response_gap() -
         return diagnostics.events
 
     events = asyncio.run(scenario())
+    assert_only_allowlisted_fields(events)
     responses = [event for event in events if event["kind"] == "http_response"]
     assert [event["operation"] for event in responses] == ["POST message", "PATCH message"]
     assert responses[0]["response_status"] == 200
@@ -176,6 +325,158 @@ def test_enabled_trace_records_safe_post_patch_headers_and_post_response_gap() -
     assert "message-content-secret-value" not in serialized
     assert "https://discord.com" not in serialized
     assert "bucket-secret-value" not in serialized
+
+
+def test_all_diagnostic_event_paths_use_allowlists_and_drop_sensitive_sentinels() -> None:
+    async def scenario() -> tuple[list[dict[str, object]], list[dict[str, object]], bool]:
+        clock = FakeClock()
+        emitted: list[dict[str, object]] = []
+        diagnostics = DiscordDiagnostics(
+            clock=clock,
+            emit=lambda event: emitted.append(dict(event)),
+        )
+        diagnostics.trace_config.freeze()
+
+        with diagnostics.operation("POST message"):
+            clock.value = 0.1
+            await emit_http_response(
+                diagnostics,
+                clock,
+                method="POST",
+                url=(f"https://discord.com/api/v10/channels/{_URL_SENTINEL}/messages"),
+                response_at=0.3,
+                status=200,
+                response_headers={
+                    "X-RateLimit-Limit": "5",
+                    "X-RateLimit-Remaining": "4",
+                    "X-RateLimit-Reset-After": "1.25",
+                    "X-RateLimit-Bucket": _BUCKET_SENTINEL,
+                    "Retry-After": "0.75",
+                    "X-Response-Body": _RESPONSE_BODY_SENTINEL,
+                },
+                request_headers={
+                    "Authorization": f"Bot {_AUTH_SENTINEL}",
+                    "X-Request-Body": _MESSAGE_SENTINEL,
+                    "X-Provider-Value": _PROVIDER_SENTINEL,
+                },
+            )
+            clock.value = 0.4
+
+        with diagnostics.operation("DELETE message"):
+            clock.value = 0.5
+            await emit_http_exception(
+                diagnostics,
+                clock,
+                method="DELETE",
+                url=(
+                    "https://discord.com/api/v10/channels/"
+                    f"{_URL_SENTINEL}/messages/{_MESSAGE_ID_SENTINEL}"
+                ),
+                response_at=0.6,
+                exception=RuntimeError(_EXCEPTION_SENTINEL),
+                request_headers={"Authorization": f"Bot {_AUTH_SENTINEL}"},
+            )
+            clock.value = 0.7
+
+        message = FakeMessage(_MESSAGE_SENTINEL)
+        sink = DiscordMessageSink(cast(Any, FakeChannel()), diagnostics=diagnostics, clock=clock)
+        await sink.delete(message)
+
+        with diagnostics.presenter_flush(chunk_count=1, force=True):
+            clock.value = 0.8
+        with (
+            pytest.raises(RuntimeError, match=_EXCEPTION_SENTINEL),
+            diagnostics.presenter_flush(chunk_count=2, force=False),
+        ):
+            raise RuntimeError(_EXCEPTION_SENTINEL)
+        diagnostics.semantic_selection(
+            boundary="newline",
+            raw_chars=80,
+            visible_chars=48,
+            hidden_tail_chars=32,
+            hidden_tail_age_s=0.1,
+            lookahead_s=0.02,
+            max_lookahead_s=0.125,
+            preview_repaired=True,
+            published=False,
+        )
+        return diagnostics.events, emitted, message.deleted
+
+    events, emitted, deleted = asyncio.run(scenario())
+    assert deleted
+    assert emitted == events
+    assert {event["kind"] for event in events} == set(_ALLOWED_DIAGNOSTIC_FIELDS)
+    assert_only_allowlisted_fields(events)
+    assert_no_sensitive_sentinels(events)
+
+
+def test_presenter_diagnostics_drop_response_text_through_the_real_sink_path() -> None:
+    async def scenario() -> tuple[list[dict[str, object]], FakeChannel]:
+        clock = FakeClock()
+        diagnostics = DiscordDiagnostics(clock=clock)
+        channel = FakeChannel()
+        presenter = ReplyPresenter(
+            DiscordMessageSink(
+                cast(Any, channel),
+                diagnostics=diagnostics,
+                clock=clock,
+            ),
+            edit_interval_s=0.0,
+            clock=clock,
+            diagnostics=diagnostics,
+            semantic_streaming=True,
+            semantic_lookahead_s=0.0,
+        )
+        presenter.append_delta(_MESSAGE_SENTINEL)
+        assert await presenter.flush()
+        await presenter.shutdown()
+        return diagnostics.events, channel
+
+    events, channel = asyncio.run(scenario())
+    assert channel.messages[0].content == _MESSAGE_SENTINEL
+    assert_only_allowlisted_fields(events)
+    assert_no_sensitive_sentinels(events)
+
+
+def test_environment_diagnostics_emit_allowlisted_jsonl_to_stderr_only(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(DISCORD_HTTP_DIAGNOSTICS_ENV, "1")
+    clock = FakeClock()
+    diagnostics = diagnostics_from_environment(clock=clock)
+    assert diagnostics is not None
+    diagnostics.trace_config.freeze()
+
+    with diagnostics.operation("POST message"):
+        clock.value = 0.1
+        asyncio.run(
+            emit_http_response(
+                diagnostics,
+                clock,
+                method="POST",
+                url=(f"https://discord.com/api/v10/channels/{_URL_SENTINEL}/messages"),
+                response_at=0.2,
+                status=200,
+                response_headers={
+                    "X-RateLimit-Bucket": _BUCKET_SENTINEL,
+                    "X-Response-Body": _RESPONSE_BODY_SENTINEL,
+                },
+                request_headers={
+                    "Authorization": f"Bot {_AUTH_SENTINEL}",
+                    "X-Request-Body": _MESSAGE_SENTINEL,
+                    "X-Provider-Value": _PROVIDER_SENTINEL,
+                },
+            )
+        )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    emitted = [cast(dict[str, object], json.loads(line)) for line in captured.err.splitlines()]
+    assert emitted
+    assert diagnostics.events == []
+    assert_only_allowlisted_fields(emitted)
+    assert_no_sensitive_sentinels(emitted)
 
 
 def test_absent_and_invalid_rate_limit_headers_are_safe() -> None:

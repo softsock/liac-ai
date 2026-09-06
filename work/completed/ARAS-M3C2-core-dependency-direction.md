@@ -1,11 +1,11 @@
 # LILAVEL-ARAS-M3C-2 — Core dependency direction guard
 
-Status: ACTIVE
+Status: COMPLETED
 Updated: 2026-09-06
 Repository / checkout: `C:\Lilavel` - canonical Lilavel repository checkout
 Branch / worktree: `feat/conversation-core`
 Base commit: `32448237b542e3144c88bcd6242ea08c49188a72`
-Last checkpoint commit: `32448237b542e3144c88bcd6242ea08c49188a72`
+Last checkpoint commit: `3ab2c7907e1f0ab8fa7491df2eb4d018131805af`
 
 ## Goal
 
@@ -72,19 +72,19 @@ explicit limitation of this mechanism.
 
 ## Remaining work
 
-- Human review and an explicit checkpoint/commit decision remain. No in-scope
-  implementation work remains.
+- None. The implementation and explicit checkpoint were completed by
+  `3ab2c7907e1f0ab8fa7491df2eb4d018131805af`.
 
 ## Next safe action
 
-Hand M3C-2 to human review for checkpoint approval. After acceptance, proceed
-to the separately recorded M3C-3; do not mix diagnostics-redaction work into
-this item.
+Proceed to the separately recorded M3C-3; do not mix diagnostics-redaction
+work into this completed item.
 
 ## Validation
 
-- preflight/topology: `PASS` - actual branch, HEAD, clean starting worktree,
-  package manifests, source imports, architecture, and M3B/M3C-1 state checked.
+- preflight/topology: `PASS` - actual branch `feat/conversation-core`, HEAD
+  `3ab2c7907e1f0ab8fa7491df2eb4d018131805af`, clean starting worktree, package
+  manifests, source imports, architecture, and M3B/M3C-1 state checked.
 - structural guard: `PASS` - from `apps/core`, targeted AST guard suite (3
   passed), Ruff check, and Ruff format check.
 - adversarial proof: `PASS` - disposable `import discord` Core-source mutation
@@ -113,12 +113,13 @@ this item.
 ## Handoff
 
 - Git/checkout state: `feat/conversation-core` at
-  `32448237b542e3144c88bcd6242ea08c49188a72`.
-- Uncommitted changes: `apps/core/tests/test_architecture_boundaries.py`, this
-  M3C-2 record, and the separate M3C-1 active-to-completed record correction.
-  Nothing is staged; no unrelated implementation paths are present.
+  `3ab2c7907e1f0ab8fa7491df2eb4d018131805af`.
+- Uncommitted changes: this completed-record lifecycle relocation. The
+  implementation, checkpoint, and prior M3C-1 lifecycle correction are
+  committed; nothing is staged and no unrelated implementation paths are
+  present.
 - Exit criteria: `SATISFIED` for the deterministic source-import guard and
   review scope; manifest-only, provider/live, Discord, restart, and full
   end-to-end evidence remain `UNVERIFIED` or explicitly limited above.
 - Blockers/unknowns: none identified.
-- Next safe action: human review/checkpoint; then a separately recorded M3C-3.
+- Next safe action: proceed with the separately recorded M3C-3.
