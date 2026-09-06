@@ -75,6 +75,10 @@ most 2000 characters. Cancelled or superseded output is marked
 `[response interrupted]`;
 failed output is marked `[response unavailable]` and failed assistant text is
 never committed by Core.
+When diagnostics are enabled, each run's presentation scope carries
+`core_run_id`, an edge-local alias of the opaque Core `ConversationRun.run_id`.
+It is attached only to the allowlisted presentation/HTTP evidence and never
+enters Core history or canonical Discord state.
 
 The default presentation mode is semantic streaming. It publishes the first
 meaningful delta immediately, then prefers safe newline/sentence/clause/word
@@ -136,9 +140,13 @@ uv run --locked python scripts/run_edge.py 2> diagnostics.jsonl
 
 Records include monotonic timing markers for the presenter flush, awaited
 discord.py operation, HTTP request start, and the response status/headers
-available at aiohttp's response trace point. Only the message route category
-is retained. URLs, authorization headers, request/response bodies, message
-text, exception messages, and raw bucket identifiers are never emitted.
+available at aiohttp's response trace point. Correlated presentation records
+join `core_run_id` to the local `flush_id`, `operation_id`, and HTTP
+`request_id`; a safe `presentation_outcome` records completion, interruption,
+or failure and its structured reason. Only the message route category is
+retained. URLs, authorization headers, request/response bodies, message text,
+exception messages, channel/message IDs, and raw bucket identifiers are never
+emitted.
 `post_response_gap_s` is the measured time from the last traced HTTP response
 to the awaited discord.py operation return; it includes body handling and any
 library lifecycle wait, so it is evidence for (not a direct hook into) a

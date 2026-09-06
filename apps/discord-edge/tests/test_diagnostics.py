@@ -64,7 +64,7 @@ class FakeChannel:
 
 _ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
     "operation_start": frozenset(
-        {"kind", "at_s", "operation", "operation_id", "presenter_flush_id"}
+        {"kind", "at_s", "operation", "operation_id", "presenter_flush_id", "core_run_id"}
     ),
     "operation_return": frozenset(
         {
@@ -73,6 +73,7 @@ _ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
             "operation",
             "operation_id",
             "presenter_flush_id",
+            "core_run_id",
             "outcome",
             "await_duration_s",
             "http_response_count",
@@ -82,7 +83,15 @@ _ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "http_request_start": frozenset(
-        {"kind", "at_s", "request_id", "operation", "operation_id", "presenter_flush_id"}
+        {
+            "kind",
+            "at_s",
+            "request_id",
+            "operation",
+            "operation_id",
+            "presenter_flush_id",
+            "core_run_id",
+        }
     ),
     "http_response": frozenset(
         {
@@ -92,6 +101,7 @@ _ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
             "operation",
             "operation_id",
             "presenter_flush_id",
+            "core_run_id",
             "response_duration_s",
             "response_status",
             "rate_limited",
@@ -110,13 +120,27 @@ _ALLOWED_DIAGNOSTIC_FIELDS: dict[str, frozenset[str]] = {
             "operation",
             "operation_id",
             "presenter_flush_id",
+            "core_run_id",
             "duration_s",
             "error_type",
         }
     ),
-    "presenter_flush_start": frozenset({"kind", "at_s", "flush_id", "chunk_count", "force"}),
+    "presenter_flush_start": frozenset(
+        {"kind", "at_s", "flush_id", "chunk_count", "force", "core_run_id"}
+    ),
     "presenter_flush_return": frozenset(
-        {"kind", "at_s", "flush_id", "duration_s", "outcome", "error_type"}
+        {"kind", "at_s", "flush_id", "duration_s", "outcome", "error_type", "core_run_id"}
+    ),
+    "presentation_outcome": frozenset(
+        {
+            "kind",
+            "at_s",
+            "core_run_id",
+            "status",
+            "reason",
+            "flush_count",
+            "terminal_flush_count",
+        }
     ),
     "semantic_selection": frozenset(
         {
@@ -400,6 +424,13 @@ def test_all_diagnostic_event_paths_use_allowlists_and_drop_sensitive_sentinels(
             preview_repaired=True,
             published=False,
         )
+        with diagnostics.presentation_context("allowlisted-core-run"):
+            diagnostics.presentation_outcome(
+                status="failed",
+                reason="presenter_error",
+                flush_count=2,
+                terminal_flush_count=1,
+            )
         return diagnostics.events, emitted, message.deleted
 
     events, emitted, deleted = asyncio.run(scenario())
@@ -554,6 +585,99 @@ def test_presenter_flushes_correlate_without_duplicate_edits_or_concurrency_chan
     ]
     assert all(event["outcome"] == "returned" for event in operation_returns)
     assert all(event["http_response_count"] == 0 for event in operation_returns)
+
+
+def test_core_run_context_joins_flush_operation_and_http_request_without_leaking() -> None:
+    async def scenario() -> list[dict[str, object]]:
+        clock = FakeClock()
+        diagnostics = DiscordDiagnostics(clock=clock)
+        diagnostics.trace_config.freeze()
+
+        with (
+            diagnostics.presentation_context("core-run-1"),
+            diagnostics.presenter_flush(chunk_count=1, force=True) as flush_id,
+            diagnostics.operation("POST message") as operation_id,
+        ):
+            clock.value = 0.1
+            await emit_http_response(
+                diagnostics,
+                clock,
+                method="POST",
+                url=(f"https://discord.com/api/v10/channels/{_MESSAGE_ID_SENTINEL}/messages"),
+                response_at=0.2,
+                status=200,
+                response_headers={},
+            )
+            diagnostics.presentation_outcome(
+                status="completed",
+                reason=None,
+                flush_count=1,
+                terminal_flush_count=1,
+            )
+
+        events = diagnostics.events
+        flush_start = next(event for event in events if event["kind"] == "presenter_flush_start")
+        operation_start = next(event for event in events if event["kind"] == "operation_start")
+        request_start = next(event for event in events if event["kind"] == "http_request_start")
+        response = next(event for event in events if event["kind"] == "http_response")
+        outcome = next(event for event in events if event["kind"] == "presentation_outcome")
+
+        assert flush_start["flush_id"] == flush_id
+        assert operation_start["operation_id"] == operation_id
+        assert operation_start["presenter_flush_id"] == flush_id
+        assert request_start["operation_id"] == operation_id
+        assert request_start["presenter_flush_id"] == flush_id
+        assert response["request_id"] == request_start["request_id"]
+        assert response["operation_id"] == operation_id
+        assert response["presenter_flush_id"] == flush_id
+        assert outcome["status"] == "completed"
+        assert all(event.get("core_run_id") == "core-run-1" for event in events)
+        assert_only_allowlisted_fields(events)
+        assert_no_sensitive_sentinels(events)
+        return events
+
+    asyncio.run(scenario())
+
+
+def test_core_run_context_isolated_between_sequential_presentations() -> None:
+    diagnostics = DiscordDiagnostics()
+
+    with diagnostics.presentation_context("core-run-a"):
+        with diagnostics.presenter_flush(chunk_count=1, force=True):
+            pass
+        diagnostics.presentation_outcome(
+            status="interrupted",
+            reason="superseded",
+            flush_count=1,
+            terminal_flush_count=1,
+        )
+    with diagnostics.presentation_context("core-run-b"):
+        with diagnostics.presenter_flush(chunk_count=1, force=True):
+            pass
+        diagnostics.presentation_outcome(
+            status="completed",
+            reason=None,
+            flush_count=1,
+            terminal_flush_count=1,
+        )
+
+    correlated = [
+        event
+        for event in diagnostics.events
+        if event["kind"] in {"presenter_flush_start", "presenter_flush_return"}
+    ]
+    assert [event["core_run_id"] for event in correlated] == [
+        "core-run-a",
+        "core-run-a",
+        "core-run-b",
+        "core-run-b",
+    ]
+    outcomes = [event for event in diagnostics.events if event["kind"] == "presentation_outcome"]
+    assert [(event["core_run_id"], event["status"], event["reason"]) for event in outcomes] == [
+        ("core-run-a", "interrupted", "superseded"),
+        ("core-run-b", "completed", None),
+    ]
+    assert_only_allowlisted_fields(diagnostics.events)
 
 
 def test_429_is_observed_without_swallowing_existing_sink_exception() -> None:

@@ -19,6 +19,16 @@ from aiohttp import TraceConfig
 
 DISCORD_HTTP_DIAGNOSTICS_ENV: Final = "LILAVEL_DISCORD_HTTP_DIAGNOSTICS"
 MessageOperation = Literal["POST message", "PATCH message", "DELETE message"]
+PresentationStatus = Literal["completed", "interrupted", "failed"]
+PresentationReason = Literal[
+    "cancelled",
+    "superseded",
+    "edge_cancelled",
+    "bridge_error",
+    "missing_terminal",
+    "core_failed",
+    "presenter_error",
+]
 DiagnosticEvent = dict[str, object]
 DiagnosticEmitter = Callable[[Mapping[str, object]], None]
 Clock = Callable[[], float]
@@ -29,6 +39,9 @@ _active_operation: contextvars.ContextVar[_OperationState | None] = contextvars.
 _active_flush_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "lilavel_discord_active_presenter_flush", default=None
 )
+_active_core_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "lilavel_discord_active_core_run", default=None
+)
 
 
 @dataclass(slots=True)
@@ -36,6 +49,7 @@ class _OperationState:
     operation_id: int
     operation: MessageOperation
     presenter_flush_id: int | None
+    core_run_id: str | None
     started_at_s: float
     response_count: int = 0
     last_response_at_s: float | None = None
@@ -47,6 +61,7 @@ class _TraceState:
     operation: MessageOperation
     operation_id: int | None
     presenter_flush_id: int | None
+    core_run_id: str | None
     started_at_s: float
     operation_state: _OperationState | None
 
@@ -94,6 +109,7 @@ class DiscordDiagnostics:
             operation_id=next(self._operation_ids),
             operation=operation,
             presenter_flush_id=_active_flush_id.get(),
+            core_run_id=_active_core_run_id.get(),
             started_at_s=self._timestamp(),
         )
         token = _active_operation.set(state)
@@ -103,6 +119,7 @@ class DiscordDiagnostics:
             operation=state.operation,
             operation_id=state.operation_id,
             presenter_flush_id=state.presenter_flush_id,
+            **_core_run_fields(state.core_run_id),
         )
         try:
             yield state.operation_id
@@ -122,6 +139,7 @@ class DiscordDiagnostics:
 
         flush_id = next(self._flush_ids)
         started_at_s = self._timestamp()
+        core_run_id = _active_core_run_id.get()
         token = _active_flush_id.set(flush_id)
         self._record(
             "presenter_flush_start",
@@ -129,6 +147,7 @@ class DiscordDiagnostics:
             flush_id=flush_id,
             chunk_count=chunk_count,
             force=force,
+            **_core_run_fields(core_run_id),
         )
         try:
             yield flush_id
@@ -141,6 +160,7 @@ class DiscordDiagnostics:
                 duration_s=finished_at_s - started_at_s,
                 outcome="raised",
                 error_type=type(error).__name__,
+                **_core_run_fields(core_run_id),
             )
             raise
         else:
@@ -151,6 +171,7 @@ class DiscordDiagnostics:
                 flush_id=flush_id,
                 duration_s=finished_at_s - started_at_s,
                 outcome="returned",
+                **_core_run_fields(core_run_id),
             )
         finally:
             _active_flush_id.reset(token)
@@ -183,6 +204,40 @@ class DiscordDiagnostics:
             published=published,
         )
 
+    @contextmanager
+    def presentation_context(self, core_run_id: str) -> Generator[None, None, None]:
+        """Bind one Core run to this edge-local diagnostic scope."""
+
+        if not core_run_id:
+            raise ValueError("core_run_id must be a non-empty string")
+        token = _active_core_run_id.set(core_run_id)
+        try:
+            yield
+        finally:
+            _active_core_run_id.reset(token)
+
+    def presentation_outcome(
+        self,
+        *,
+        status: PresentationStatus,
+        reason: PresentationReason | None,
+        flush_count: int,
+        terminal_flush_count: int,
+    ) -> None:
+        """Record one safe terminal outcome for a correlated presentation."""
+
+        core_run_id = _active_core_run_id.get()
+        if core_run_id is None:
+            return
+        self._record(
+            "presentation_outcome",
+            core_run_id=core_run_id,
+            status=status,
+            reason=reason,
+            flush_count=flush_count,
+            terminal_flush_count=terminal_flush_count,
+        )
+
     def _record_operation_return(
         self,
         state: _OperationState,
@@ -197,6 +252,7 @@ class DiscordDiagnostics:
             operation=state.operation,
             operation_id=state.operation_id,
             presenter_flush_id=state.presenter_flush_id,
+            **_core_run_fields(state.core_run_id),
             outcome=outcome,
             await_duration_s=finished_at_s - state.started_at_s,
             http_response_count=state.response_count,
@@ -218,11 +274,15 @@ class DiscordDiagnostics:
         presenter_flush_id = _active_flush_id.get()
         if presenter_flush_id is None and operation_state is not None:
             presenter_flush_id = operation_state.presenter_flush_id
+        core_run_id = _active_core_run_id.get()
+        if core_run_id is None and operation_state is not None:
+            core_run_id = operation_state.core_run_id
         state = _TraceState(
             request_id=next(self._request_ids),
             operation=operation,
             operation_id=(None if operation_state is None else operation_state.operation_id),
             presenter_flush_id=presenter_flush_id,
+            core_run_id=core_run_id,
             started_at_s=self._timestamp(),
             operation_state=operation_state,
         )
@@ -234,6 +294,7 @@ class DiscordDiagnostics:
             operation=state.operation,
             operation_id=state.operation_id,
             presenter_flush_id=state.presenter_flush_id,
+            **_core_run_fields(state.core_run_id),
         )
 
     async def _on_request_end(self, _session: Any, trace_context: Any, params: Any) -> None:
@@ -254,6 +315,7 @@ class DiscordDiagnostics:
             operation=state.operation,
             operation_id=state.operation_id,
             presenter_flush_id=state.presenter_flush_id,
+            **_core_run_fields(state.core_run_id),
             response_duration_s=finished_at_s - state.started_at_s,
             response_status=status,
             rate_limited=status == 429,
@@ -272,6 +334,7 @@ class DiscordDiagnostics:
             operation=state.operation,
             operation_id=state.operation_id,
             presenter_flush_id=state.presenter_flush_id,
+            **_core_run_fields(state.core_run_id),
             duration_s=finished_at_s - state.started_at_s,
             error_type=type(getattr(params, "exception", RuntimeError())).__name__,
         )
@@ -290,6 +353,12 @@ class DiscordDiagnostics:
 
     def _timestamp(self) -> float:
         return self._clock() - self._origin
+
+
+def _core_run_fields(core_run_id: str | None) -> dict[str, object]:
+    if core_run_id is None:
+        return {}
+    return {"core_run_id": core_run_id}
 
 
 def attach_http_trace(client: Any, diagnostics: DiscordDiagnostics | None) -> None:
