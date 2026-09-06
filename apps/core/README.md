@@ -162,6 +162,57 @@ Callers must derive it only from trusted, application-owned semantic fixtures;
 Provider metadata, session state, tools, and transport details remain outside
 this layer.
 
+## Local canonical persistence and raw evidence
+
+`ConversationCore` uses a narrow `ConversationStore` boundary. The default
+store is a separate in-memory SQLite database for deterministic ephemeral
+callers. A caller that needs restart-safe history supplies one
+`SQLiteConversationStore` backed by a filesystem path and an explicit stable
+provider-neutral `scope_id`:
+
+```python
+store = SQLiteConversationStore("conversation.sqlite3")
+core = ConversationCore(runtime, scope_id="stable-scope", store=store)
+```
+
+The durable model is intentionally separate from `ContextMessage`. A
+`CanonicalMessage` has a Core-owned `message_id`, `scope_id`, monotonic
+`sequence_no`, role, text, and UTC creation timestamp. The existing model
+context still contains only `ContextMessage(role, text)`, so durable identity
+never changes the version-two wire shape. `core.canonical_history` exposes the
+durable records; `core.history` remains the compatibility role/text view.
+
+Schema version `1` is stored in SQLite `PRAGMA user_version`. It creates only
+`conversation_messages` and `evidence_records`, with foreign-key and
+uniqueness constraints. Every canonical message append and its corresponding
+raw evidence record are committed in one `BEGIN IMMEDIATE` transaction.
+Evidence stores provenance (`source_message_id`, source role, canonical
+provenance kind, observed/created timestamps) and no copied text; the source
+canonical message is the content authority. Evidence has no claim,
+confidence, temporal-validity, retrieval, or reflection semantics.
+
+`message_id` is the Core-owned idempotency key. Replaying the same message ID
+with the same scope, role, and text returns the existing immutable message and
+does not add another evidence record. Reusing it with different data fails
+with `PersistenceConflict`. Invalid sources, roles, scope mismatches, schema
+versions, unreadable databases, and SQLite write failures raise typed
+`PersistenceError` subclasses. There is no silent fallback from a configured
+durable store to memory, and a failed assistant persistence write settles the
+run as failed without reporting a canonical assistant success.
+
+The SQLite transaction is the canonical assistant commit point. A crash or
+runtime failure before that point leaves the accepted user but no assistant;
+if the transaction has already committed, the assistant is durable even if a
+process crash prevents the caller from observing the later semantic terminal
+event. Delivery acknowledgement is deliberately outside this foundation.
+
+The persistence benchmark is a local directional smoke, not a universal
+latency guarantee:
+
+```powershell
+uv run --locked python scripts/persistence_latency.py
+```
+
 The opt-in live Luna probe uses the existing supported authentication and
 prints only semantic results and timing observations:
 

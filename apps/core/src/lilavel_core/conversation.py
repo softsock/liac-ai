@@ -9,6 +9,14 @@ from threading import Event, Lock, RLock, Thread
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from .persistence import (
+    CanonicalMessage,
+    ConversationStore,
+    EvidenceRecord,
+    PersistenceError,
+    SQLiteConversationStore,
+    validate_scope_id,
+)
 from .sidecar_protocol import (
     ContextMessage,
     GenerationCancelled,
@@ -101,6 +109,7 @@ class ConversationFailed:
 
     run_id: str
     text: str
+    error: PersistenceError | None = None
 
 
 type ConversationEvent = (
@@ -115,6 +124,7 @@ class ConversationOutcome:
     run_id: str
     status: ConversationStatus
     text: str
+    error: PersistenceError | None = None
 
 
 class ConversationRun:
@@ -130,8 +140,12 @@ class ConversationRun:
         core: ConversationCore,
         run_id: str,
         predecessor: ConversationRun | None,
+        user_message_id: str,
+        assistant_message_id: str,
     ) -> None:
         self.run_id = run_id
+        self.user_message_id = user_message_id
+        self.assistant_message_id = assistant_message_id
         self._core = core
         self._predecessor = predecessor
         self._events: Queue[ConversationEvent] = Queue()
@@ -144,6 +158,7 @@ class ConversationRun:
         self._runtime_generation: RuntimeGeneration | None = None
         self._cancel_sent = False
         self._assistant_committed = False
+        self._assistant_commit_reserved = False
         self._consumer_active = False
         self._worker = Thread(
             target=self._execute,
@@ -290,7 +305,11 @@ class ConversationRun:
             if isinstance(event, TextDelta):
                 self._core.publish_delta(self, event.delta)
             elif isinstance(event, GenerationCompleted):
-                commit = self._core.commit_assistant(self)
+                try:
+                    commit = self._core.commit_assistant(self)
+                except PersistenceError as error:
+                    self._settle_failed(error)
+                    return
                 if commit == "committed":
                     self._settle_completed()
                 elif commit == "superseded":
@@ -341,11 +360,11 @@ class ConversationRun:
             ConversationCancelled(self.run_id, text, reason),
         )
 
-    def _settle_failed(self) -> None:
+    def _settle_failed(self, error: PersistenceError | None = None) -> None:
         text = self._candidate_text()
         self._settle(
-            ConversationOutcome(self.run_id, "failed", text),
-            ConversationFailed(self.run_id, text),
+            ConversationOutcome(self.run_id, "failed", text, error),
+            ConversationFailed(self.run_id, text, error),
         )
 
     def _settle(self, outcome: ConversationOutcome, event: ConversationEvent) -> None:
@@ -365,14 +384,23 @@ class ConversationRun:
         with self._lock:
             if self._outcome is not None or self._cancel_requested:
                 return "cancelled", None
-            if self._assistant_committed:
+            if self._assistant_committed or self._assistant_commit_reserved:
                 return "already", None
             try:
                 message = ContextMessage("assistant", "".join(self._candidate_parts))
             except ProtocolError:
                 return "invalid", None
-            self._assistant_committed = True
+            self._assistant_commit_reserved = True
             return "new", message
+
+    def mark_assistant_committed(self) -> None:
+        with self._lock:
+            self._assistant_commit_reserved = False
+            self._assistant_committed = True
+
+    def release_assistant_commit(self) -> None:
+        with self._lock:
+            self._assistant_commit_reserved = False
 
 
 type _CommitResult = Literal["committed", "superseded", "cancelled", "invalid"]
@@ -387,20 +415,48 @@ class ConversationCore:
         *,
         composer: ConversationContextComposer | None = None,
         trusted_guidance: Sequence[str] = (),
+        scope_id: str | None = None,
+        store: ConversationStore | None = None,
     ) -> None:
         self._runtime = runtime
         self._composer = composer or FullHistoryContextComposer()
         self._trusted_guidance = tuple(trusted_guidance)
         self._lock = RLock()
-        self._history: list[ContextMessage] = []
+        self._store = store or SQLiteConversationStore(":memory:")
+        self._scope_id = validate_scope_id(scope_id if scope_id is not None else str(uuid4()))
+        self._canonical_messages: list[CanonicalMessage] = list(
+            self._store.load_canonical_messages(self._scope_id)
+        )
         self._active: ConversationRun | None = None
+
+    @property
+    def scope_id(self) -> str:
+        """Return the provider-neutral durable scope identity."""
+
+        return self._scope_id
 
     @property
     def history(self) -> tuple[ContextMessage, ...]:
         """Return canonical user and successfully completed assistant messages."""
 
         with self._lock:
-            return tuple(self._history)
+            return tuple(
+                ContextMessage(message.role, message.text) for message in self._canonical_messages
+            )
+
+    @property
+    def canonical_history(self) -> tuple[CanonicalMessage, ...]:
+        """Return canonical messages with their durable Core-owned identities."""
+
+        with self._lock:
+            return tuple(self._canonical_messages)
+
+    @property
+    def evidence_records(self) -> tuple[EvidenceRecord, ...]:
+        """Load raw provenance records for audit/testing."""
+
+        with self._lock:
+            return self._store.load_evidence(self._scope_id)
 
     @property
     def active_run(self) -> ConversationRun | None:
@@ -419,6 +475,7 @@ class ConversationCore:
         """
 
         user_message = ContextMessage("user", text)
+        user_message_id = str(uuid4())
         with self._lock:
             previous = self._active
             if previous is not None and previous.settled:
@@ -427,8 +484,19 @@ class ConversationCore:
             if previous is not None and not supersede:
                 raise ConversationBusy("a conversation run is already active")
 
-            self._history.append(user_message)
-            run = ConversationRun(self, str(uuid4()), previous)
+            canonical_user = self._store.append_user_message(
+                scope_id=self._scope_id,
+                message_id=user_message_id,
+                text=user_message.text,
+            )
+            self._canonical_messages.append(canonical_user)
+            run = ConversationRun(
+                self,
+                str(uuid4()),
+                previous,
+                canonical_user.message_id,
+                str(uuid4()),
+            )
             self._active = run
 
         if previous is not None:
@@ -438,7 +506,9 @@ class ConversationCore:
 
     def build_model_request(self) -> ModelRequest:
         with self._lock:
-            history = tuple(self._history)
+            history = tuple(
+                ContextMessage(message.role, message.text) for message in self._canonical_messages
+            )
         composed = tuple(self._composer.compose(history))
         return ModelRequest(messages=composed, system_prompt=self._trusted_guidance)
 
@@ -459,7 +529,17 @@ class ConversationCore:
                 return "cancelled"
             if reservation == "invalid" or assistant_message is None:
                 return "invalid"
-            self._history.append(assistant_message)
+            try:
+                canonical_assistant = self._store.append_assistant_message(
+                    scope_id=self._scope_id,
+                    message_id=run.assistant_message_id,
+                    text=assistant_message.text,
+                )
+            except Exception:
+                run.release_assistant_commit()
+                raise
+            self._canonical_messages.append(canonical_assistant)
+            run.mark_assistant_committed()
             return "committed"
 
     def run_settled(self, run: ConversationRun) -> None:

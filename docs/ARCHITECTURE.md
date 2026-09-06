@@ -20,8 +20,21 @@ conversation and delegates physical cancellation and generation settlement to
 Canonical history is composed into model input through a small
 `ConversationContextComposer` seam. The initial composer sends the complete
 provider-neutral structured role/text history. This keeps future context
-selection separate from canonical storage without adding persistence,
-compaction, memory, or provider continuation state.
+selection and compaction separate from canonical storage without adding
+provider continuation state. Core's local persistence layer stores canonical
+messages and raw provenance evidence; it does not yet implement memory claims,
+retrieval, reflection, or memory injection.
+
+`ConversationCore` accepts a user message only after an atomic append to its
+Core-owned `ConversationStore`, and it commits an assistant message only after
+a live generation completes successfully. The store writes the canonical
+message and its raw evidence record in one SQLite transaction. Cancelled,
+superseded, failed, stale, and partial assistant output has no persistence
+path. A durable caller supplies an explicit provider-neutral scope ID and
+reopens the same SQLite database; the Discord edge does not supply or own this
+mapping in this slice. The transaction is the assistant commit point: a crash
+before it leaves only the accepted user, while a crash after it can leave a
+durable assistant whose delivery acknowledgement was not observed.
 
 ## Model transport
 
