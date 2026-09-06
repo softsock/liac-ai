@@ -1,13 +1,79 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   encodeCommand,
   encodeEvent,
   parseCommand,
+  ProtocolError,
   PROTOCOL_LIMITS,
+  type ProtocolEvent,
   type ProtocolCommand,
 } from "../src/protocol.js";
 
+type SharedCase = {
+  id: string;
+  surface: "command" | "event";
+  purpose: string;
+  frame: string;
+  expected:
+    | { accepted: true; semantic: Record<string, unknown> }
+    | { accepted: false; reason?: string };
+};
+
+type SharedCorpus = {
+  format_version: number;
+  description: string;
+  cases: SharedCase[];
+};
+
+const sharedCorpus = JSON.parse(
+  readFileSync(new URL("../../../testdata/protocol-v2/cases.json", import.meta.url), "utf8"),
+) as SharedCorpus;
+
+function normalize(value: ProtocolCommand | ProtocolEvent): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function parseSharedCase(sharedCase: SharedCase): ProtocolCommand | ProtocolEvent {
+  if (sharedCase.surface === "command") return parseCommand(sharedCase.frame);
+  const event = JSON.parse(sharedCase.frame) as ProtocolEvent;
+  return JSON.parse(encodeEvent(event)) as ProtocolEvent;
+}
+
+function rejectionReason(error: unknown): string | undefined {
+  if (error instanceof ProtocolError) return error.reason;
+  if (error instanceof SyntaxError) return "malformed";
+  return undefined;
+}
+
 describe("sidecar protocol", () => {
+  test("consumes the repository-shared Protocol V2 corpus", () => {
+    expect(sharedCorpus.format_version).toBe(1);
+    expect(sharedCorpus.cases.length).toBeGreaterThan(0);
+  });
+
+  for (const sharedCase of sharedCorpus.cases) {
+    test(`shared corpus: ${sharedCase.id}`, () => {
+      let parsed: ProtocolCommand | ProtocolEvent;
+      try {
+        parsed = parseSharedCase(sharedCase);
+      } catch (error) {
+        expect(sharedCase.expected.accepted).toBe(false);
+        const reason = rejectionReason(error);
+        expect(reason).toBeDefined();
+        if (!sharedCase.expected.accepted && sharedCase.expected.reason !== undefined) {
+          expect(reason).toBe(sharedCase.expected.reason);
+        }
+        return;
+      }
+
+      expect(sharedCase.expected.accepted).toBe(true);
+      if (sharedCase.expected.accepted) {
+        expect(normalize(parsed)).toEqual(sharedCase.expected.semantic);
+      }
+    });
+  }
+
   test("round-trips the minimal command and event shapes", () => {
     const command: ProtocolCommand = {
       protocol_version: 2,

@@ -1,6 +1,8 @@
 """Deterministic coverage for the version-two sidecar wire contract."""
 
 import json
+from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -30,6 +32,136 @@ from lilavel_core.sidecar_protocol import (
     parse_command,
     parse_event,
 )
+
+
+def _object_dict(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return cast(dict[str, object], value)
+
+
+_SHARED_CORPUS = Path(__file__).resolve().parents[3] / "testdata" / "protocol-v2" / "cases.json"
+
+
+def _shared_cases() -> list[dict[str, object]]:
+    payload = _object_dict(json.loads(_SHARED_CORPUS.read_text(encoding="utf-8")))
+    assert payload.get("format_version") == 1
+    cases = payload.get("cases")
+    assert isinstance(cases, list)
+    return [cast(dict[str, object], case) for case in cast(list[object], cases)]
+
+
+def _case_id(case: object) -> str:
+    value = _object_dict(case).get("id")
+    assert isinstance(value, str)
+    return value
+
+
+def _normalize(value: object) -> dict[str, object]:
+    if isinstance(value, GenerateCommand):
+        result: dict[str, object] = {
+            "protocol_version": 2,
+            "type": "generate",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+        }
+        if value.prompt is not None:
+            result["prompt"] = value.prompt
+        elif value.messages is not None:
+            result["messages"] = [
+                {"role": message.role, "text": message.text} for message in value.messages
+            ]
+        if value.system_prompt:
+            result["system_prompt"] = list(value.system_prompt)
+        return result
+    if isinstance(value, CancelCommand):
+        return {
+            "protocol_version": 2,
+            "type": "cancel",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+        }
+    if isinstance(value, HealthCommand):
+        return {"protocol_version": 2, "type": "health"}
+    if isinstance(value, ShutdownCommand):
+        return {"protocol_version": 2, "type": "shutdown"}
+    if isinstance(value, ReadyEvent):
+        return {
+            "protocol_version": 2,
+            "type": "ready",
+            "provider": value.provider,
+            "model_id": value.model_id,
+            "api": value.api,
+        }
+    if isinstance(value, HealthEvent):
+        return {"protocol_version": 2, "type": "health", "state": value.state}
+    if isinstance(value, GenerationAccepted):
+        return {
+            "protocol_version": 2,
+            "type": "accepted",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+        }
+    if isinstance(value, TextDelta):
+        return {
+            "protocol_version": 2,
+            "type": "text_delta",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+            "delta": value.delta,
+        }
+    if isinstance(value, GenerationCompleted):
+        return {
+            "protocol_version": 2,
+            "type": "completed",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+        }
+    if isinstance(value, GenerationCancelled):
+        return {
+            "protocol_version": 2,
+            "type": "cancelled",
+            "generation_id": value.generation_id,
+            "epoch": value.epoch,
+        }
+    if isinstance(value, GenerationFailed):
+        result = {"protocol_version": 2, "type": "failed", "code": value.code}
+        if value.generation_id is not None and value.epoch is not None:
+            result["generation_id"] = value.generation_id
+            result["epoch"] = value.epoch
+        return result
+    if isinstance(value, ShutdownEvent):
+        return {"protocol_version": 2, "type": "shutdown"}
+    raise AssertionError(f"unsupported parsed protocol value: {type(value)!r}")
+
+
+@pytest.mark.parametrize("case", _shared_cases(), ids=_case_id)
+def test_shared_protocol_v2_corpus(case: dict[str, object]) -> None:
+    surface = case["surface"]
+    frame = case["frame"]
+    assert isinstance(surface, str)
+    assert isinstance(frame, str)
+    expected = _object_dict(case["expected"])
+    accepted = expected.get("accepted")
+    assert isinstance(accepted, bool)
+
+    try:
+        if surface == "command":
+            parsed = parse_command(frame)
+        elif surface == "event":
+            parsed = parse_event(frame)
+        else:
+            raise AssertionError(f"unsupported shared protocol surface: {surface}")
+    except ProtocolError as error:
+        assert accepted is False, case["id"]
+        reason = expected.get("reason")
+        if reason is not None:
+            assert isinstance(reason, str)
+            assert error.reason == reason
+        return
+
+    assert accepted is True, case["id"]
+    semantic = _object_dict(expected.get("semantic"))
+    assert _normalize(parsed) == semantic
 
 
 def test_command_round_trip_keeps_small_request_shape() -> None:
