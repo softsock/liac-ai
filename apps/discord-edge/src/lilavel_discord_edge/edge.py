@@ -7,7 +7,7 @@ import os
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Any, Final, cast
@@ -25,7 +25,12 @@ from lilavel_core import (
     ModelRuntime,
 )
 
-from .diagnostics import DiscordDiagnostics, attach_http_trace
+from .diagnostics import (
+    DiscordDiagnostics,
+    PresentationReason,
+    PresentationStatus,
+    attach_http_trace,
+)
 from .presenter import DEFAULT_EDIT_INTERVAL_S, ReplyPresenter
 from .semantic import DEFAULT_SEMANTIC_LOOKAHEAD_S, DEFAULT_SEMANTIC_MAX_TAIL_CHARS
 from .transport import DiscordMessageSink, TransportMetrics, validate_edit_interval
@@ -425,59 +430,88 @@ class DiscordTextEdge:
         bridge = _ConversationEventBridge(run, asyncio.get_running_loop())
         event_task: asyncio.Task[ConversationEvent | _BridgeEnd] | None = None
         presenter_error_task: asyncio.Task[BaseException] | None = None
-        presenter.start()
-        try:
-            bridge.start()
-            presenter_error_task = asyncio.create_task(
-                presenter.wait_for_error(),
-                name="lilavel-discord-reply-presenter-error",
-            )
-            while True:
-                event_task = asyncio.create_task(
-                    bridge.queue.get(),
-                    name="lilavel-discord-event-bridge-get",
+        presentation_status: PresentationStatus = "failed"
+        presentation_reason: PresentationReason | None = "missing_terminal"
+        diagnostic_context = (
+            self._diagnostics.presentation_context(run.run_id)
+            if self._diagnostics is not None
+            else nullcontext()
+        )
+        with diagnostic_context:
+            try:
+                presenter.start()
+                bridge.start()
+                presenter_error_task = asyncio.create_task(
+                    presenter.wait_for_error(),
+                    name="lilavel-discord-reply-presenter-error",
                 )
-                done, _ = await asyncio.wait(
-                    (event_task, presenter_error_task),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if presenter_error_task in done:
-                    raise presenter_error_task.result()
-                item = event_task.result()
-                if isinstance(item, _BridgeEnd):
-                    if item.error is not None or not presenter.finalized:
-                        await presenter.failed(run.text)
-                    return
-                if isinstance(item, ConversationTextDelta):
-                    presenter.append_delta(item.delta)
-                elif isinstance(item, ConversationCompleted):
-                    await presenter.complete(item.text)
-                    return
-                elif isinstance(item, ConversationCancelled):
-                    await presenter.interrupted(item.text)
-                    return
-                else:
-                    await presenter.failed(item.text)
-                    return
-        except asyncio.CancelledError:
-            if not run.settled:
-                run.cancel()
-            raise
-        except BaseException:
-            if not run.settled:
-                run.cancel()
-            raise
-        finally:
-            if event_task is not None and not event_task.done():
-                event_task.cancel()
-            if presenter_error_task is not None and not presenter_error_task.done():
-                presenter_error_task.cancel()
-            if event_task is not None:
-                await asyncio.gather(event_task, return_exceptions=True)
-            if presenter_error_task is not None:
-                await asyncio.gather(presenter_error_task, return_exceptions=True)
-            await presenter.shutdown()
-            await asyncio.to_thread(bridge.join, self._close_timeout_s)
+                while True:
+                    event_task = asyncio.create_task(
+                        bridge.queue.get(),
+                        name="lilavel-discord-event-bridge-get",
+                    )
+                    done, _ = await asyncio.wait(
+                        (event_task, presenter_error_task),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if presenter_error_task in done:
+                        raise presenter_error_task.result()
+                    item = event_task.result()
+                    if isinstance(item, _BridgeEnd):
+                        if item.error is not None or not presenter.finalized:
+                            presentation_reason = (
+                                "bridge_error" if item.error is not None else "missing_terminal"
+                            )
+                            await presenter.failed(run.text)
+                        presentation_status = "failed"
+                        return
+                    if isinstance(item, ConversationTextDelta):
+                        presenter.append_delta(item.delta)
+                    elif isinstance(item, ConversationCompleted):
+                        await presenter.complete(item.text)
+                        presentation_status = "completed"
+                        presentation_reason = None
+                        return
+                    elif isinstance(item, ConversationCancelled):
+                        await presenter.interrupted(item.text)
+                        presentation_status = "interrupted"
+                        presentation_reason = item.reason
+                        return
+                    else:
+                        await presenter.failed(item.text)
+                        presentation_status = "failed"
+                        presentation_reason = "core_failed"
+                        return
+            except asyncio.CancelledError:
+                presentation_status = "interrupted"
+                presentation_reason = "edge_cancelled"
+                if not run.settled:
+                    run.cancel()
+                raise
+            except BaseException:
+                presentation_status = "failed"
+                presentation_reason = "presenter_error"
+                if not run.settled:
+                    run.cancel()
+                raise
+            finally:
+                if event_task is not None and not event_task.done():
+                    event_task.cancel()
+                if presenter_error_task is not None and not presenter_error_task.done():
+                    presenter_error_task.cancel()
+                if event_task is not None:
+                    await asyncio.gather(event_task, return_exceptions=True)
+                if presenter_error_task is not None:
+                    await asyncio.gather(presenter_error_task, return_exceptions=True)
+                await presenter.shutdown()
+                await asyncio.to_thread(bridge.join, self._close_timeout_s)
+                if self._diagnostics is not None:
+                    self._diagnostics.presentation_outcome(
+                        status=presentation_status,
+                        reason=presentation_reason,
+                        flush_count=presenter.flush_count,
+                        terminal_flush_count=presenter.terminal_flush_count,
+                    )
 
     async def _present_failure(self, channel: Any) -> None:
         presenter = ReplyPresenter(

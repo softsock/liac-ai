@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from queue import Queue
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from aiohttp.tracing import TraceRequestEndParams, TraceRequestStartParams
 from lilavel_core import (
     ContextMessage,
     ConversationCore,
@@ -19,12 +22,15 @@ from lilavel_core import (
     ModelRequest,
     TextDelta,
 )
+from multidict import CIMultiDict
+from yarl import URL
 
 from lilavel_discord_edge import (
     DISCORD_TOKEN_ENV,
     FAILED_MARKER,
     INTERRUPTED_MARKER,
     SEMANTIC_STREAMING_ENV,
+    DiscordDiagnostics,
     DiscordTextEdge,
     make_dm_intents,
     read_discord_token,
@@ -99,6 +105,63 @@ class FakeChannel:
     async def send(self, **kwargs: Any) -> FakeMessage:
         self.sends.append(kwargs)
         message = FakeMessage(cast(str, kwargs["content"]), fail_edits=self.fail_edits)
+        self.messages.append(message)
+        return message
+
+
+async def emit_fake_http_request(diagnostics: DiscordDiagnostics, method: str, path: str) -> None:
+    trace = diagnostics.trace_config
+    context = trace.trace_config_ctx()
+    url = URL(f"https://discord.com/api/v10{path}")
+    await trace.on_request_start.send(
+        cast(Any, None),
+        context,
+        TraceRequestStartParams(method, url, CIMultiDict()),
+    )
+    await trace.on_request_end.send(
+        cast(Any, None),
+        context,
+        TraceRequestEndParams(
+            method,
+            url,
+            CIMultiDict(),
+            cast(Any, SimpleNamespace(status=200, headers=CIMultiDict())),
+        ),
+    )
+
+
+class TracingFakeMessage(FakeMessage):
+    def __init__(self, content: str, *, diagnostics: DiscordDiagnostics, channel_id: str) -> None:
+        super().__init__(content)
+        self._diagnostics = diagnostics
+        self._channel_id = channel_id
+
+    async def edit(self, **kwargs: Any) -> FakeMessage:
+        await emit_fake_http_request(
+            self._diagnostics,
+            "PATCH",
+            f"/channels/{self._channel_id}/messages/remote-message-id",
+        )
+        return await super().edit(**kwargs)
+
+
+class TracingFakeChannel(FakeChannel):
+    def __init__(self, channel_id: str, diagnostics: DiscordDiagnostics) -> None:
+        super().__init__(channel_id)
+        self._diagnostics = diagnostics
+
+    async def send(self, **kwargs: Any) -> FakeMessage:
+        self.sends.append(kwargs)
+        await emit_fake_http_request(
+            self._diagnostics,
+            "POST",
+            f"/channels/{self.id}/messages",
+        )
+        message = TracingFakeMessage(
+            cast(str, kwargs["content"]),
+            diagnostics=self._diagnostics,
+            channel_id=self.id,
+        )
         self.messages.append(message)
         return message
 
@@ -180,6 +243,7 @@ def edge_for(
     message_filter: Any = default_message_filter,
     semantic_streaming: bool = False,
     semantic_lookahead_s: float = 0.0,
+    diagnostics: DiscordDiagnostics | None = None,
 ) -> tuple[DiscordTextEdge, FakeClient]:
     client = FakeClient()
     edge = DiscordTextEdge(
@@ -191,6 +255,7 @@ def edge_for(
         close_timeout_s=2.0,
         semantic_streaming=semantic_streaming,
         semantic_lookahead_s=semantic_lookahead_s,
+        diagnostics=diagnostics,
     )
     return edge, client
 
@@ -371,6 +436,149 @@ def test_completion_flushes_and_core_commits_only_successful_assistant() -> None
     asyncio.run(scenario())
 
 
+def test_edge_diagnostics_join_core_run_to_flush_operation_and_http_request_chain() -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        cores: list[ConversationCore] = []
+        diagnostics = DiscordDiagnostics()
+        diagnostics.trace_config.freeze()
+
+        def core_factory(value: Any) -> ConversationCore:
+            core = ConversationCore(value)
+            cores.append(core)
+            return core
+
+        edge, _ = edge_for(
+            lambda: runtime,
+            core_factory=core_factory,
+            diagnostics=diagnostics,
+        )
+        channel = TracingFakeChannel("m4c3-channel-sentinel", diagnostics)
+        await edge.handle_message(inbound(channel, "m4c3-inbound-sentinel", "hello"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        finish(runtime.generations[0], "diagnostic reply")
+        await edge.wait_idle()
+
+        core_run_id = next(
+            record.run_id
+            for record in cores[0].runtime_evidence()
+            if record.kind == "turn_accepted"
+        )
+        correlated = [
+            event for event in diagnostics.events if event.get("core_run_id") == core_run_id
+        ]
+        flush_starts = [event for event in correlated if event["kind"] == "presenter_flush_start"]
+        operation_starts = [event for event in correlated if event["kind"] == "operation_start"]
+        request_starts = [event for event in correlated if event["kind"] == "http_request_start"]
+        responses = [event for event in correlated if event["kind"] == "http_response"]
+        outcome = next(event for event in correlated if event["kind"] == "presentation_outcome")
+
+        assert correlated
+        assert flush_starts
+        assert operation_starts
+        assert request_starts
+        assert responses
+        assert outcome["status"] == "completed"
+        assert outcome["reason"] is None
+        assert all(event["core_run_id"] == core_run_id for event in correlated)
+        assert all(
+            event["presenter_flush_id"] in {flush["flush_id"] for flush in flush_starts}
+            for event in operation_starts + request_starts + responses
+        )
+        assert all(
+            event["operation_id"] in {operation["operation_id"] for operation in operation_starts}
+            for event in request_starts + responses
+        )
+        assert all(
+            event["request_id"] in {request["request_id"] for request in request_starts}
+            for event in responses
+        )
+        assert all(
+            event.get("core_run_id") == core_run_id
+            for event in diagnostics.events
+            if event["kind"]
+            in {
+                "presenter_flush_start",
+                "presenter_flush_return",
+                "operation_start",
+                "operation_return",
+                "http_request_start",
+                "http_response",
+            }
+        )
+        serialized = json.dumps(diagnostics.events, sort_keys=True)
+        assert "m4c3-channel-sentinel" not in serialized
+        assert "remote-message-id" not in serialized
+        assert "diagnostic reply" not in serialized
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_edge_presentations_do_not_cross_correlate_diagnostics() -> None:
+    async def scenario() -> None:
+        runtimes: list[FakeRuntime] = []
+        cores: list[ConversationCore] = []
+        diagnostics = DiscordDiagnostics()
+        diagnostics.trace_config.freeze()
+
+        def runtime_factory() -> FakeRuntime:
+            runtime = FakeRuntime()
+            runtimes.append(runtime)
+            return runtime
+
+        def core_factory(value: Any) -> ConversationCore:
+            core = ConversationCore(value)
+            cores.append(core)
+            return core
+
+        edge, _ = edge_for(
+            runtime_factory,
+            core_factory=core_factory,
+            diagnostics=diagnostics,
+        )
+        channel_a = TracingFakeChannel("m4c3-channel-a", diagnostics)
+        channel_b = TracingFakeChannel("m4c3-channel-b", diagnostics)
+        await edge.handle_message(inbound(channel_a, "m4c3-message-a", "first"))
+        await edge.handle_message(inbound(channel_b, "m4c3-message-b", "second"))
+        await wait_until(
+            lambda: len(runtimes) == 2 and all(runtime.generations for runtime in runtimes)
+        )
+
+        finish(runtimes[0].generations[0], "reply-a")
+        finish(runtimes[1].generations[0], "reply-b")
+        await edge.wait_idle()
+
+        run_ids = [
+            next(
+                record.run_id
+                for record in core.runtime_evidence()
+                if record.kind == "turn_accepted"
+            )
+            for core in cores
+        ]
+        assert len(run_ids) == 2
+        assert run_ids[0] != run_ids[1]
+        for run_id in run_ids:
+            correlated = [
+                event for event in diagnostics.events if event.get("core_run_id") == run_id
+            ]
+            assert correlated
+            assert any(event["kind"] == "presentation_outcome" for event in correlated)
+            assert all(event.get("core_run_id") == run_id for event in correlated)
+        assert {
+            event["core_run_id"]
+            for event in diagnostics.events
+            if event["kind"] == "presentation_outcome"
+        } == set(run_ids)
+        serialized = json.dumps(diagnostics.events, sort_keys=True)
+        assert "m4c3-channel-a" not in serialized
+        assert "m4c3-channel-b" not in serialized
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
 def test_same_dm_channel_preserves_core_owned_multi_turn_continuity() -> None:
     async def scenario() -> None:
         runtime = FakeRuntime()
@@ -439,6 +647,81 @@ def test_supersede_marks_old_reply_interrupted_and_discards_partial_core_output(
     asyncio.run(scenario())
 
 
+def test_superseded_edge_presentation_remains_correlated_to_its_own_run() -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        cores: list[ConversationCore] = []
+        diagnostics = DiscordDiagnostics()
+        diagnostics.trace_config.freeze()
+
+        def core_factory(value: Any) -> ConversationCore:
+            core = ConversationCore(value)
+            cores.append(core)
+            return core
+
+        edge, _ = edge_for(
+            lambda: runtime,
+            core_factory=core_factory,
+            diagnostics=diagnostics,
+        )
+        channel = TracingFakeChannel("m4c3-supersede-channel", diagnostics)
+
+        await edge.handle_message(inbound(channel, "m4c3-old-message", "old turn"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        old_generation = runtime.generations[0]
+        old_generation.emit(GenerationAccepted(old_generation.generation_id, old_generation.epoch))
+        old_generation.emit(
+            TextDelta(old_generation.generation_id, old_generation.epoch, "partial")
+        )
+        await wait_until(lambda: channel.messages and channel.messages[0].content == "partial")
+
+        await edge.handle_message(inbound(channel, "m4c3-new-message", "new turn"))
+        await wait_until(lambda: runtime.cancelled_ids == [old_generation.generation_id])
+        await wait_until(lambda: len(runtime.generations) == 2)
+        finish(runtime.generations[1], "fresh")
+        await edge.wait_idle()
+
+        run_ids = [
+            record.run_id
+            for record in cores[0].runtime_evidence()
+            if record.kind == "turn_accepted"
+        ]
+        assert len(run_ids) == 2
+        old_run_id, new_run_id = run_ids
+        old_events = [
+            event for event in diagnostics.events if event.get("core_run_id") == old_run_id
+        ]
+        new_events = [
+            event for event in diagnostics.events if event.get("core_run_id") == new_run_id
+        ]
+        old_outcome = next(event for event in old_events if event["kind"] == "presentation_outcome")
+        new_outcome = next(event for event in new_events if event["kind"] == "presentation_outcome")
+
+        assert old_outcome["status"] == "interrupted"
+        assert old_outcome["reason"] == "superseded"
+        assert new_outcome["status"] == "completed"
+        assert new_outcome["reason"] is None
+        assert any(event["kind"] == "http_request_start" for event in old_events)
+        assert any(event["kind"] == "http_request_start" for event in new_events)
+        assert all(event.get("core_run_id") == old_run_id for event in old_events)
+        assert all(event.get("core_run_id") == new_run_id for event in new_events)
+        assert any(
+            record.run_id == old_run_id
+            and record.kind == "run_terminal"
+            and record.result == "superseded"
+            for record in cores[0].runtime_evidence()
+        )
+        assert channel.messages[0].content.endswith(INTERRUPTED_MARKER)
+        assert channel.messages[-1].content == "fresh"
+        serialized = json.dumps(diagnostics.events, sort_keys=True)
+        assert "m4c3-supersede-channel" not in serialized
+        assert "m4c3-old-message" not in serialized
+        assert "m4c3-new-message" not in serialized
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
 def test_semantic_edge_does_not_reveal_unpublished_tail_on_cancellation() -> None:
     async def scenario() -> None:
         runtime = FakeRuntime()
@@ -489,6 +772,48 @@ def test_failure_marks_reply_without_committing_assistant_text() -> None:
 
         assert channel.messages[0].content.endswith(FAILED_MARKER)
         assert cores[0].history == (ContextMessage("user", "hello"),)
+        await edge.close()
+
+    asyncio.run(scenario())
+
+
+def test_failed_core_run_records_safe_correlated_presentation_outcome() -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        cores: list[ConversationCore] = []
+        diagnostics = DiscordDiagnostics()
+
+        def core_factory(value: Any) -> ConversationCore:
+            core = ConversationCore(value)
+            cores.append(core)
+            return core
+
+        edge, _ = edge_for(
+            lambda: runtime,
+            core_factory=core_factory,
+            diagnostics=diagnostics,
+        )
+        channel = FakeChannel("m4c3-failure-channel")
+        await edge.handle_message(inbound(channel, "m4c3-failure-message", "hello"))
+        await wait_until(lambda: len(runtime.generations) == 1)
+        generation = runtime.generations[0]
+        generation.emit(
+            GenerationFailedEvent(generation.generation_id, generation.epoch, "provider_error")
+        )
+        await edge.wait_idle()
+
+        run_id = next(
+            record.run_id
+            for record in cores[0].runtime_evidence()
+            if record.kind == "turn_accepted"
+        )
+        outcome = next(
+            event for event in diagnostics.events if event["kind"] == "presentation_outcome"
+        )
+        assert outcome["core_run_id"] == run_id
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "core_failed"
+        assert "provider_error" not in json.dumps(diagnostics.events, sort_keys=True)
         await edge.close()
 
     asyncio.run(scenario())
