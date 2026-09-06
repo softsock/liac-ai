@@ -1,11 +1,11 @@
 # LILAVEL-ARAS-M3C-1 - Protocol V2 cross-language compatibility enforcement
 
-Status: ACTIVE
+Status: COMPLETED
 Updated: 2026-09-06
 Repository / checkout: `C:\Lilavel` - canonical Lilavel repository checkout
 Branch / worktree: `feat/conversation-core`
 Base commit: `4bd09afb48e3f6da50d1619550e64246081d5292`
-Last checkpoint commit: `4bd09afb48e3f6da50d1619550e64246081d5292`
+Last checkpoint commit: `32448237b542e3144c88bcd6242ea08c49188a72`
 
 ## Goal
 
@@ -69,15 +69,15 @@ configuration changed.
 
 ## Remaining work
 
-- Human review and an explicit checkpoint/commit decision remain.
+- None for the M3C-1 implementation. Its implementation and record were
+  checkpointed by commits `32448237` and `815a492`.
 - `OWN-01` and `AUTH-02` are not part of this item and remain unimplemented
   proposals from M3B.
 
 ## Next safe action
 
-Hand M3C-1 to human review for checkpoint approval. After acceptance, the next
-separate bounded item may be M3C-2 (`OWN-01`); do not mix its paths or design
-into this work item.
+Proceed to the separately recorded M3C-2 (`OWN-01`); do not mix its paths or
+design into this completed work item.
 
 ## Validation
 
@@ -109,13 +109,15 @@ into this work item.
 
 ## Handoff
 
-- Git/checkout state: `feat/conversation-core` at `4bd09afb`; one commit ahead
-  of `origin/feat/conversation-core`; no commit was created for M3C-1.
-- Task-owned uncommitted paths: the two protocol test files, shared fixture,
-  this active record, and the M3B active-to-completed record relocation.
-  Nothing is staged; no unrelated paths are present.
+- Git/checkout state: `feat/conversation-core` at
+  `32448237b542e3144c88bcd6242ea08c49188a72`; the M3C-1 implementation and
+  its active record were checkpointed in commits `32448237` and `815a492`.
+- Task-owned implementation paths are committed. This record's status
+  correction and active-to-completed relocation are current execution-state
+  housekeeping and remain uncommitted until the next requested checkpoint.
+  Nothing is staged; no unrelated implementation paths are present.
 - Exit criteria: `SATISFIED` for the deterministic M3C-1 implementation and
   review scope; live/provider/Discord/restart claims remain `UNVERIFIED`.
 - Promotion: no canonical architecture or decision was promoted.
-- Recommendation: ready for human review/checkpoint; after approval, proceed
-  to a separately recorded M3C-2 only with its own accepted scope.
+- Recommendation: M3C-1 is closed; proceed to a separately recorded M3C-2
+  with its own accepted scope.
