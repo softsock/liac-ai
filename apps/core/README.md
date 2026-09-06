@@ -73,6 +73,25 @@ remains strict through EOF: a non-empty unterminated line is a malformed
 protocol frame, including after a shutdown request; only the sidecar's valid
 acknowledgement followed by a zero exit is clean.
 
+## Physical runtime evidence
+
+`ModelRuntime.physical_evidence()` returns a copied, bounded, process-ephemeral
+snapshot of safe physical generation evidence. It records generation creation,
+accepted/streaming/terminal protocol event classes, aggregate text-delta counts
+and UTF-8 byte lengths, and terminal outcomes or normalized safe failure codes.
+It never stores request text, delta content, provider payloads, auth material,
+or exception bodies. The trace is diagnostic evidence, not canonical history
+or durable provenance.
+
+The version-two protocol carries `generation_id` and `epoch` on every
+generation-scoped command/event. On the Core-launched path,
+`ModelSidecar.generate()` receives that identity and sets its sidecar-local
+`requestId` to the same `generation_id`; the sidecar request ID is therefore an
+alias, not a second semantic identity. Join `ConversationCore.runtime_evidence()`
+from `run_id` to `generation_id`/`epoch`, then use
+`ModelRuntime.physical_evidence()` for the corresponding protocol activity and
+physical terminal outcome. Neither trace changes canonical persistence.
+
 On Windows, Core launches the default `npx` entry point with
 `CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP`, verifies Job Object
 containment, and resumes it only after the containment handle is attached.

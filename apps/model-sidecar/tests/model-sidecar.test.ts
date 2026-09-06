@@ -204,6 +204,44 @@ describe("ModelSidecar", () => {
     expect(auth.closed).toBe(true);
   });
 
+  test("uses the Core generation identity as the sidecar request alias", async () => {
+    const events: SidecarEvent[] = [];
+    const sidecar = createModelSidecar({
+      auth: new FakeAuth(),
+      model,
+      stream: makeStream(async function* () {
+        yield event("text_delta", "safe-delta");
+        yield event("done");
+      }),
+      onEvent: (item) => events.push(item),
+    });
+    openHandles.push(sidecar);
+
+    await sidecar.start();
+    const handle = sidecar.generate("ignored by the evidence projection", {
+      generationId: "core-generation-1",
+      epoch: 7,
+    });
+    await expect(handle.result).resolves.toMatchObject({
+      requestId: "core-generation-1",
+      status: "completed",
+    });
+
+    expect(handle.generationId).toBe("core-generation-1");
+    expect(handle.epoch).toBe(7);
+    expect(
+      events
+        .filter((item) => item.requestId !== undefined)
+        .map((item) => ({ requestId: item.requestId, epoch: item.epoch })),
+    ).toEqual([
+      { requestId: "core-generation-1", epoch: 7 },
+      { requestId: "core-generation-1", epoch: 7 },
+      { requestId: "core-generation-1", epoch: 7 },
+      { requestId: "core-generation-1", epoch: 7 },
+      { requestId: "core-generation-1", epoch: 7 },
+    ]);
+  });
+
   test("passes genuine deltas before completion instead of buffering final text", async () => {
     let releaseSecond: (() => void) | undefined;
     const second = new Promise<void>((resolve) => {

@@ -82,6 +82,7 @@ function command(type: "generate" | "cancel", generationId: string, epoch: numbe
 test("protocol server performs ready, genuine streaming, cancellation, recovery, and shutdown", async () => {
   const input = new InputQueue();
   const output = new CaptureOutput();
+  const sidecarEvents: SidecarEvent[] = [];
   let cancelledCommandSent = false;
   let recoveryCommandSent = false;
   const server = new ProtocolServer({
@@ -105,6 +106,7 @@ test("protocol server performs ready, genuine streaming, cancellation, recovery,
           yield providerEvent("done");
         }),
         onEvent: (event) => {
+          sidecarEvents.push(event);
           onEvent(event);
           if (event.type === "text_delta" && event.delta === "before-cancel" && !cancelledCommandSent) {
             cancelledCommandSent = true;
@@ -143,6 +145,22 @@ test("protocol server performs ready, genuine streaming, cancellation, recovery,
   expect(frames.filter((frame) => frame.type === "accepted").map((frame) => frame.generation_id)).toEqual([
     "first",
     "recovery",
+  ]);
+  expect(
+    sidecarEvents
+      .filter((event) => event.requestId !== undefined)
+      .map((event) => ({ requestId: event.requestId, epoch: event.epoch })),
+  ).toEqual([
+    { requestId: "first", epoch: 1 },
+    { requestId: "first", epoch: 1 },
+    { requestId: "first", epoch: 1 },
+    { requestId: "first", epoch: 1 },
+    { requestId: "first", epoch: 1 },
+    { requestId: "recovery", epoch: 2 },
+    { requestId: "recovery", epoch: 2 },
+    { requestId: "recovery", epoch: 2 },
+    { requestId: "recovery", epoch: 2 },
+    { requestId: "recovery", epoch: 2 },
   ]);
 });
 

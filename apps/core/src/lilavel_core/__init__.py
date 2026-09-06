@@ -35,6 +35,7 @@ from .persistence import (
     SQLiteConversationStore,
 )
 from .runtime import (
+    PHYSICAL_EVIDENCE_CAPACITY,
     CancellationTimeout,
     EventQueueOverflow,
     GenerationFailed,
@@ -42,6 +43,7 @@ from .runtime import (
     GenerationResult,
     ModelRuntime,
     ModelRuntimeError,
+    PhysicalGenerationEvidenceRecord,
     ProtocolViolation,
     RuntimeBusy,
     RuntimeHealth,
@@ -99,6 +101,8 @@ __all__ = [
     "ModelRequest",
     "ModelRuntime",
     "ModelRuntimeError",
+    "PHYSICAL_EVIDENCE_CAPACITY",
+    "PhysicalGenerationEvidenceRecord",
     "PersistenceConflict",
     "PersistenceError",
     "PersistenceIntegrityError",

@@ -9,6 +9,8 @@ from lilavel_core import (
     GenerationAccepted,
     GenerationCancelled,
     GenerationCompleted,
+    GenerationFailed,
+    GenerationFailedEvent,
     ModelRequest,
     ModelRuntime,
     ProtocolViolation,
@@ -23,13 +25,18 @@ FIXTURE = Path(__file__).parent / "fixtures" / "fake_sidecar.py"
 
 
 def runtime(
-    mode: str = "normal", *, startup_timeout: float = 30.0, write_timeout: float = 5.0
+    mode: str = "normal",
+    *,
+    startup_timeout: float = 30.0,
+    write_timeout: float = 5.0,
+    physical_evidence_capacity: int = 256,
 ) -> ModelRuntime:
     return ModelRuntime(
         command=(sys.executable, str(FIXTURE), mode),
         sidecar_dir=Path(__file__).parents[1],
         startup_timeout=startup_timeout,
         write_timeout=write_timeout,
+        physical_evidence_capacity=physical_evidence_capacity,
     )
 
 
@@ -54,6 +61,34 @@ def test_start_streams_events_and_shuts_down_cleanly() -> None:
         model.shutdown()
 
     assert model.health().state == "closed"
+
+
+def test_physical_evidence_correlates_protocol_activity_without_raw_output() -> None:
+    model = runtime()
+    model.start()
+    try:
+        handle = model.generate(ModelRequest("stream"))
+        assert handle.wait(2.0).status == "completed"
+        list(handle)
+
+        evidence = model.physical_evidence()
+        assert all(record.generation_id == handle.generation_id for record in evidence)
+        assert all(record.epoch == handle.epoch for record in evidence)
+        assert [(record.kind, record.protocol_event, record.result) for record in evidence] == [
+            ("generation_created", None, None),
+            ("protocol_event", "accepted", None),
+            ("protocol_event", "text_delta", None),
+            ("protocol_event", "completed", None),
+            ("generation_terminal", None, "completed"),
+        ]
+        delta = next(record for record in evidence if record.protocol_event == "text_delta")
+        assert delta.event_count == 1
+        assert delta.event_bytes == len(b"streamed")
+        assert "streamed" not in repr(evidence)
+        assert "provider" not in repr(evidence)
+        assert "session" not in repr(evidence)
+    finally:
+        model.shutdown()
 
 
 def test_cancel_waits_for_terminal_event_and_recovers_in_same_process() -> None:
@@ -83,6 +118,58 @@ def test_cancel_waits_for_terminal_event_and_recovers_in_same_process() -> None:
         model.shutdown()
 
 
+def test_physical_evidence_correlates_cancellation_to_sidecar_terminal() -> None:
+    model = runtime("supersede-race")
+    model.start()
+    try:
+        cancelled = model.generate(ModelRequest("cancel"))
+        stream = iter(cancelled)
+        assert isinstance(next(stream), GenerationAccepted)
+        assert isinstance(next(stream), TextDelta)
+        assert model.cancel(cancelled.generation_id)
+        assert cancelled.wait(2.0).status == "cancelled"
+        list(stream)
+
+        evidence = model.physical_evidence()
+        protocol_events = [
+            record.protocol_event for record in evidence if record.kind == "protocol_event"
+        ]
+        assert protocol_events == ["accepted", "text_delta", "cancelled"]
+        terminal = evidence[-1]
+        assert terminal.kind == "generation_terminal"
+        assert terminal.result == "cancelled"
+        assert terminal.generation_id == cancelled.generation_id
+        assert terminal.epoch == cancelled.epoch
+    finally:
+        model.shutdown()
+
+
+def test_physical_evidence_correlates_sidecar_failure_code() -> None:
+    model = runtime("cleanup-timeout")
+    model.start()
+    try:
+        failed = model.generate(ModelRequest("cancel"))
+        stream = iter(failed)
+        assert isinstance(next(stream), GenerationAccepted)
+        assert isinstance(next(stream), TextDelta)
+        assert model.cancel(failed.generation_id)
+        with pytest.raises(GenerationFailed):
+            failed.wait(2.0)
+        assert any(isinstance(event, GenerationFailedEvent) for event in stream)
+
+        evidence = model.physical_evidence()
+        failure_event = next(record for record in evidence if record.protocol_event == "failed")
+        assert failure_event.generation_id == failed.generation_id
+        assert failure_event.epoch == failed.epoch
+        assert failure_event.failure_code == "cleanup_timeout"
+        terminal = evidence[-1]
+        assert terminal.kind == "generation_terminal"
+        assert terminal.result == "failed"
+        assert terminal.failure_code == "cleanup_timeout"
+    finally:
+        model.shutdown()
+
+
 def test_unexpected_sidecar_death_fails_pending_generation() -> None:
     model = runtime("crash-after-accepted")
     model.start()
@@ -93,6 +180,37 @@ def test_unexpected_sidecar_death_fails_pending_generation() -> None:
     assert model.health().state == "failed"
     with pytest.raises(RuntimeNotReady):
         model.generate(ModelRequest("not-reusable"))
+
+    evidence = model.physical_evidence()
+    assert [record.protocol_event for record in evidence if record.kind == "protocol_event"] == [
+        "accepted"
+    ]
+    terminal = evidence[-1]
+    assert terminal.kind == "generation_terminal"
+    assert terminal.result == "failed"
+    assert terminal.failure_code == "sidecar_crashed"
+    assert terminal.generation_id == handle.generation_id
+    assert terminal.epoch == handle.epoch
+
+
+def test_physical_evidence_is_bounded_and_snapshot_isolated() -> None:
+    model = runtime(physical_evidence_capacity=5)
+    model.start()
+    try:
+        first = model.generate(ModelRequest("stream"))
+        assert first.wait(2.0).status == "completed"
+        list(first)
+        second = model.generate(ModelRequest("stream"))
+        assert second.wait(2.0).status == "completed"
+        list(second)
+
+        snapshot = model.physical_evidence()
+        assert len(snapshot) == 5
+        assert all(record.generation_id == second.generation_id for record in snapshot)
+        object.__setattr__(snapshot[0], "kind", "tampered")
+        assert model.physical_evidence()[0].kind == "generation_created"
+    finally:
+        model.shutdown()
 
 
 def test_malformed_sidecar_output_fails_closed() -> None:

@@ -9,9 +9,10 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Iterator, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import BinaryIO, Final, Literal, cast
@@ -50,6 +51,7 @@ DEFAULT_STARTUP_TIMEOUT: Final = 30.0
 DEFAULT_SHUTDOWN_TIMEOUT: Final = 5.0
 DEFAULT_CANCELLATION_TIMEOUT: Final = 7.0
 DEFAULT_WRITE_TIMEOUT: Final = 5.0
+PHYSICAL_EVIDENCE_CAPACITY: Final = 256
 _READ_CHUNK_SIZE: Final = 4096
 
 
@@ -113,6 +115,144 @@ class GenerationResult:
     generation_id: str
     status: Literal["completed", "cancelled"]
     text: str
+
+
+type PhysicalEvidenceKind = Literal[
+    "generation_created",
+    "protocol_event",
+    "generation_terminal",
+]
+type PhysicalProtocolEvent = Literal[
+    "accepted",
+    "text_delta",
+    "completed",
+    "cancelled",
+    "failed",
+]
+type PhysicalEvidenceResult = Literal["completed", "cancelled", "failed"]
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalGenerationEvidenceRecord:
+    """Safe, bounded evidence for one physical Core↔sidecar generation.
+
+    The protocol path supplies the sidecar's ``requestId`` from Core's
+    ``generation_id``.  It is therefore intentionally represented by the
+    existing generation identity rather than duplicated as another field.
+    Text deltas contribute only aggregate counts and byte lengths.
+    """
+
+    sequence: int
+    kind: PhysicalEvidenceKind
+    generation_id: str
+    epoch: int
+    protocol_event: PhysicalProtocolEvent | None = None
+    result: PhysicalEvidenceResult | None = None
+    failure_code: str | None = None
+    event_count: int = 0
+    event_bytes: int = 0
+
+
+class _PhysicalEvidenceTrace:
+    """Bounded storage for immutable physical generation evidence snapshots."""
+
+    def __init__(self, capacity: int) -> None:
+        if capacity <= 0:
+            raise ValueError("physical evidence capacity must be positive")
+        self._records: deque[PhysicalGenerationEvidenceRecord] = deque(maxlen=capacity)
+        self._next_sequence = 1
+        self._text_delta_sequences: dict[tuple[str, int], int] = {}
+        self._terminal_sequences: dict[tuple[str, int], int] = {}
+
+    def append_generation_created(self, *, generation_id: str, epoch: int) -> None:
+        self._append(
+            PhysicalGenerationEvidenceRecord(
+                sequence=self._next_sequence,
+                kind="generation_created",
+                generation_id=generation_id,
+                epoch=epoch,
+            )
+        )
+
+    def append_protocol_event(
+        self,
+        *,
+        generation_id: str,
+        epoch: int,
+        protocol_event: PhysicalProtocolEvent,
+        failure_code: str | None = None,
+        event_bytes: int = 0,
+    ) -> None:
+        key = (generation_id, epoch)
+        if protocol_event == "text_delta":
+            sequence = self._text_delta_sequences.get(key)
+            if sequence is not None:
+                for index, record in enumerate(self._records):
+                    if record.sequence == sequence:
+                        self._records[index] = replace(
+                            record,
+                            event_count=record.event_count + 1,
+                            event_bytes=record.event_bytes + event_bytes,
+                        )
+                        return
+                del self._text_delta_sequences[key]
+
+        record = PhysicalGenerationEvidenceRecord(
+            sequence=self._next_sequence,
+            kind="protocol_event",
+            generation_id=generation_id,
+            epoch=epoch,
+            protocol_event=protocol_event,
+            failure_code=failure_code,
+            event_count=1,
+            event_bytes=event_bytes,
+        )
+        self._append(record)
+        if protocol_event == "text_delta":
+            self._text_delta_sequences[key] = record.sequence
+
+    def append_generation_terminal(
+        self,
+        *,
+        generation_id: str,
+        epoch: int,
+        result: PhysicalEvidenceResult,
+        failure_code: str | None = None,
+    ) -> None:
+        key = (generation_id, epoch)
+        if key in self._terminal_sequences:
+            return
+        record = PhysicalGenerationEvidenceRecord(
+            sequence=self._next_sequence,
+            kind="generation_terminal",
+            generation_id=generation_id,
+            epoch=epoch,
+            result=result,
+            failure_code=failure_code,
+        )
+        self._append(record)
+        self._terminal_sequences[key] = record.sequence
+
+    def snapshot(self) -> tuple[PhysicalGenerationEvidenceRecord, ...]:
+        return tuple(replace(record) for record in self._records)
+
+    def _append(self, record: PhysicalGenerationEvidenceRecord) -> None:
+        if len(self._records) == self._records.maxlen:
+            evicted = self._records[0]
+            key = (evicted.generation_id, evicted.epoch)
+            if (
+                evicted.kind == "protocol_event"
+                and evicted.protocol_event == "text_delta"
+                and self._text_delta_sequences.get(key) == evicted.sequence
+            ):
+                del self._text_delta_sequences[key]
+            if (
+                evicted.kind == "generation_terminal"
+                and self._terminal_sequences.get(key) == evicted.sequence
+            ):
+                del self._terminal_sequences[key]
+        self._records.append(record)
+        self._next_sequence += 1
 
 
 class GenerationHandle:
@@ -275,6 +415,7 @@ class ModelRuntime:
         cancellation_timeout: float = DEFAULT_CANCELLATION_TIMEOUT,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
         event_queue_size: int = DEFAULT_EVENT_QUEUE_SIZE,
+        physical_evidence_capacity: int = PHYSICAL_EVIDENCE_CAPACITY,
     ) -> None:
         if not all(
             math.isfinite(value) and value > 0
@@ -288,6 +429,8 @@ class ModelRuntime:
             raise ValueError("runtime timeouts must be positive")
         if type(event_queue_size) is not int or event_queue_size <= 0:
             raise ValueError("event_queue_size must be a positive integer")
+        if type(physical_evidence_capacity) is not int or physical_evidence_capacity <= 0:
+            raise ValueError("physical_evidence_capacity must be a positive integer")
         self._command = tuple(command) if command is not None else _default_command()
         self._sidecar_dir = sidecar_dir or _default_sidecar_dir()
         self._startup_timeout = startup_timeout
@@ -295,6 +438,7 @@ class ModelRuntime:
         self._cancellation_timeout = cancellation_timeout
         self._write_timeout = write_timeout
         self._event_queue_size = event_queue_size
+        self._physical_evidence = _PhysicalEvidenceTrace(physical_evidence_capacity)
         self._lock = threading.RLock()
         # Serializes admission and the corresponding wire command.  Holding
         # this lock for the bounded write prevents shutdown from closing
@@ -329,6 +473,17 @@ class ModelRuntime:
                 pid=self._process.pid if self._process is not None else None,
                 error=str(self._failure) if self._failure is not None else None,
             )
+
+    def physical_evidence(self) -> tuple[PhysicalGenerationEvidenceRecord, ...]:
+        """Return a bounded snapshot of safe physical sidecar evidence.
+
+        This trace is process-ephemeral and independent from canonical
+        conversation history.  It contains no request text, provider payload,
+        auth material, or exception body.
+        """
+
+        with self._lock:
+            return self._physical_evidence.snapshot()
 
     def start(self) -> None:
         with self._lock:
@@ -445,6 +600,10 @@ class ModelRuntime:
             self._active = pending
             self._state = "busy"
             self._last_cancel = None
+            self._physical_evidence.append_generation_created(
+                generation_id=generation_id,
+                epoch=self._next_epoch,
+            )
         try:
             self._write_command(command)
         except ProtocolError as error:
@@ -799,6 +958,18 @@ class ModelRuntime:
                 self._fail_runtime_locked(ProtocolViolation("generation epoch mismatch"))
                 return
 
+            protocol_event = _physical_protocol_event(event)
+            if protocol_event is not None:
+                self._physical_evidence.append_protocol_event(
+                    generation_id=pending.generation_id,
+                    epoch=pending.epoch,
+                    protocol_event=protocol_event,
+                    failure_code=event.code if isinstance(event, GenerationFailedEvent) else None,
+                    event_bytes=(
+                        len(event.delta.encode("utf-8")) if isinstance(event, TextDelta) else 0
+                    ),
+                )
+
             if isinstance(event, GenerationAccepted):
                 # Cancellation is a caller intent, not proof that the request
                 # was never admitted by the sidecar.  ``accepted`` may race
@@ -844,6 +1015,11 @@ class ModelRuntime:
                 else:
                     pending.phase = "terminal"
                     pending.handle.complete(event)
+                    self._physical_evidence.append_generation_terminal(
+                        generation_id=pending.generation_id,
+                        epoch=pending.epoch,
+                        result="completed",
+                    )
                     self._finish_pending_locked(pending)
             elif isinstance(event, GenerationCancelled):
                 if pending.phase not in {"accepted", "streaming", "cancelling"}:
@@ -851,6 +1027,11 @@ class ModelRuntime:
                 else:
                     pending.phase = "terminal"
                     pending.handle.complete(event)
+                    self._physical_evidence.append_generation_terminal(
+                        generation_id=pending.generation_id,
+                        epoch=pending.epoch,
+                        result="cancelled",
+                    )
                     self._finish_pending_locked(pending)
             else:
                 if event.code in {
@@ -865,6 +1046,12 @@ class ModelRuntime:
                 else:
                     pending.phase = "terminal"
                     pending.handle.fail(event, GenerationFailed(event.code))
+                    self._physical_evidence.append_generation_terminal(
+                        generation_id=pending.generation_id,
+                        epoch=pending.epoch,
+                        result="failed",
+                        failure_code=event.code,
+                    )
                     self._finish_pending_locked(pending)
         if cancel_after_limit:
             try:
@@ -887,6 +1074,7 @@ class ModelRuntime:
         pending = self._active
         if pending is None:
             return
+        already_terminal = pending.phase == "terminal"
         pending.phase = "terminal"
         event = GenerationFailedEvent(
             pending.generation_id,
@@ -894,6 +1082,13 @@ class ModelRuntime:
             _failure_code(failure),
         )
         pending.handle.fail(event, failure)
+        if not already_terminal:
+            self._physical_evidence.append_generation_terminal(
+                generation_id=pending.generation_id,
+                epoch=pending.epoch,
+                result="failed",
+                failure_code=_physical_failure_code(failure),
+            )
         self._finish_pending_locked(pending)
 
     def _arm_cancellation_watchdog_locked(self, pending: _PendingGeneration) -> None:
@@ -983,6 +1178,36 @@ def _failure_code(failure: ModelRuntimeError) -> ProtocolErrorCode:
     if isinstance(failure, ProtocolViolation):
         return "protocol_error"
     return "provider_error"
+
+
+def _physical_protocol_event(event: GenerationEvent) -> PhysicalProtocolEvent | None:
+    if isinstance(event, GenerationAccepted):
+        return "accepted"
+    if isinstance(event, TextDelta):
+        return "text_delta"
+    if isinstance(event, GenerationCompleted):
+        return "completed"
+    if isinstance(event, GenerationCancelled):
+        return "cancelled"
+    if isinstance(event, GenerationFailedEvent):
+        return "failed"
+    return None
+
+
+def _physical_failure_code(failure: ModelRuntimeError) -> str:
+    if isinstance(failure, EventQueueOverflow):
+        return "event_queue_overflow"
+    if isinstance(failure, CancellationTimeout):
+        return "cancellation_timeout"
+    if isinstance(failure, ShutdownTimeout):
+        return "shutdown_timeout"
+    if isinstance(failure, GenerationFailed):
+        return failure.code
+    if isinstance(failure, ProtocolViolation):
+        return "protocol_error"
+    if isinstance(failure, SidecarCrashed):
+        return "sidecar_crashed"
+    return "runtime_error"
 
 
 def _default_command() -> tuple[str, ...]:

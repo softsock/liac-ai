@@ -24,6 +24,15 @@ so a provider completion can win a completion/cancellation race. `close()`
 aborts active work and closes auth; the protocol host supplies the outer
 shutdown deadline when the sidecar runs as a process.
 
+The optional `onEvent` observer receives ephemeral typed diagnostics keyed by
+`requestId` and `epoch`, including request receipt, provider dispatch, safe
+event classes, lengths, timing marks, and safe error codes. Text-delta
+diagnostics remain direct observer data and are not a durable evidence store.
+When the protocol host supplies `GenerationIdentity`, `requestId` is exactly
+the Core `generation_id`; it is a sidecar transport alias and never semantic
+conversation identity. The protocol host projects only the version-two
+generation identity and safe protocol event shape to Core.
+
 Normal provider completion, cancellation, or failure can release the sidecar
 for another request only after provider cleanup resolves. Cleanup waits for
 the async iterator's `return()` and, when present, the stream's
