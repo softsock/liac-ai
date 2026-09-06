@@ -72,6 +72,7 @@ Distinguish deterministic, live/provider-dependent, platform-specific, `BLOCKED`
 - [Validation](docs/VALIDATION.md) — package checks, live checks, and result semantics.
 - [Decisions](docs/decisions/) — the five current architectural decisions.
 - Scoped package contracts: [Core](apps/core/README.md), [model sidecar](apps/model-sidecar/README.md), and [Discord edge](apps/discord-edge/README.md).
+- [Execution continuity](work/README.md) — substantial in-progress work uses this contract and a record under `work/active/` when such work exists; records are execution state and never override current Git or canonical docs. Do not duplicate the schema here.
 
 ## Maintaining This File
 
