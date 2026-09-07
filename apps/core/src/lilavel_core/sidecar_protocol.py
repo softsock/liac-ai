@@ -64,7 +64,7 @@ class ContextMessage:
     text: str
 
     def __post_init__(self) -> None:
-        if self.role not in {"user", "assistant"}:
+        if self.role not in ("user", "assistant"):
             raise ProtocolError("invalid_field")
         _bounded_string(self.text, MAX_PROMPT_BYTES, "text")
 
@@ -422,7 +422,7 @@ def _parse_context_messages(value: object) -> tuple[ContextMessage, ...]:
         item = cast(dict[str, object], raw_item)
         _expect_keys(item, "role", "text")
         role = item["role"]
-        if role not in {"user", "assistant"}:
+        if not isinstance(role, str) or role not in {"user", "assistant"}:
             raise ProtocolError("invalid_field")
         messages.append(
             ContextMessage(
@@ -469,17 +469,17 @@ def _validate_guidance(value: object) -> tuple[str, ...]:
 
 
 def _parse_object(payload: bytes | str) -> dict[str, object]:
-    if isinstance(payload, bytes):
-        if len(payload) > MAX_FRAME_BYTES:
-            raise ProtocolError("frame_too_large")
-    else:
-        if len(payload.encode("utf-8")) > MAX_FRAME_BYTES:
-            raise ProtocolError("frame_too_large")
     try:
+        if isinstance(payload, bytes):
+            if len(payload) > MAX_FRAME_BYTES:
+                raise ProtocolError("frame_too_large")
+            payload = payload.decode("utf-8")
+        elif _utf8_size(payload) > MAX_FRAME_BYTES:
+            raise ProtocolError("frame_too_large")
         value = json.loads(payload, object_pairs_hook=_pairs)
     except ProtocolError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as error:
+    except (UnicodeError, ValueError, TypeError, RecursionError) as error:
         raise ProtocolError("malformed") from error
     if not isinstance(value, dict):
         raise ProtocolError("malformed")
@@ -524,7 +524,7 @@ def _version(value: dict[str, object]) -> None:
 
 
 def _id(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_ID_BYTES:
+    if not isinstance(value, str) or not value or _utf8_size(value) > MAX_ID_BYTES:
         raise ProtocolError("invalid_field")
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise ProtocolError("invalid_field")
@@ -537,19 +537,26 @@ def _epoch(value: object) -> int:
     return value
 
 
+def _utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ProtocolError("invalid_field") from error
+
+
 def _bounded_string(value: object, maximum: int, field: str) -> str:
-    if not isinstance(value, str) or len(value.encode("utf-8")) > maximum:
+    if not isinstance(value, str) or _utf8_size(value) > maximum:
         raise ProtocolError(f"invalid_{field}")
     return value
 
 
 def _health_state(value: object) -> None:
-    if value not in {"starting", "ready", "busy", "failed", "closed"}:
+    if not isinstance(value, str) or value not in {"starting", "ready", "busy", "failed", "closed"}:
         raise ProtocolError("invalid_field")
 
 
 def _error_code(value: object) -> None:
-    if value not in {
+    if not isinstance(value, str) or value not in {
         "busy",
         "not_ready",
         "closed",

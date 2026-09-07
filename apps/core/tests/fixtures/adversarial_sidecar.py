@@ -84,6 +84,8 @@ def main() -> int:
                 emit(generation_event("cancelled", command["generation_id"], command["epoch"]))
         elif command_type == "shutdown":
             emit({"protocol_version": 2, "type": "shutdown"})
+            if mode == "malformed-after-shutdown":
+                emit({"protocol_version": 2, "type": "failed", "code": []})
             return 0
     return 0
 

@@ -322,3 +322,53 @@ def test_command_variants_have_no_extra_semantics() -> None:
     )
     assert isinstance(parse_command(encode_command(HealthCommand())), HealthCommand)
     assert isinstance(parse_command(encode_command(ShutdownCommand())), ShutdownCommand)
+
+
+@pytest.mark.parametrize("parser", [parse_command, parse_event])
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32", "utf-32-be"])
+def test_parser_requires_utf8_bytes(parser: object, encoding: str) -> None:
+    payload = '{"protocol_version":2,"type":"shutdown"}'.encode(encoding)
+    with pytest.raises(ProtocolError):
+        parser(payload)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("parser", [parse_command, parse_event])
+@pytest.mark.parametrize("payload", [b"\xff", '"\ud800"', "[" * 2000, "1" * 5000])
+def test_parser_normalizes_malformed_input(parser: object, payload: bytes | str) -> None:
+    with pytest.raises(ProtocolError):
+        parser(payload)  # type: ignore[operator]
+
+
+@pytest.mark.parametrize("field", ["prompt", "generation_id", "messages", "system_prompt"])
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_command_normalizes_escaped_surrogates(field: str, surrogate: str) -> None:
+    frame: dict[str, object] = {
+        "protocol_version": 2,
+        "type": "generate",
+        "generation_id": "x",
+        "epoch": 1,
+        "prompt": "hello",
+    }
+    if field == "messages":
+        del frame["prompt"]
+        frame[field] = [{"role": "user", "text": surrogate}]
+    elif field == "system_prompt":
+        frame[field] = [surrogate]
+    else:
+        frame[field] = surrogate
+    with pytest.raises(ProtocolError):
+        parse_command(json.dumps(frame))
+
+
+def test_event_normalizes_escaped_surrogate_and_preserves_valid_pair() -> None:
+    frame = {
+        "protocol_version": 2,
+        "type": "text_delta",
+        "generation_id": "x",
+        "epoch": 1,
+        "delta": "\ud800",
+    }
+    with pytest.raises(ProtocolError):
+        parse_event(json.dumps(frame))
+    frame["delta"] = "\U0001f600"
+    assert parse_event(json.dumps(frame)) == TextDelta("x", 1, "\U0001f600")

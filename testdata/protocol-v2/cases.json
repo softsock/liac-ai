@@ -325,6 +325,26 @@
       "purpose": "scoped failure identity is all-or-none",
       "frame": "{\"protocol_version\":2,\"type\":\"failed\",\"generation_id\":\"gen-prompt\",\"code\":\"provider_error\"}",
       "expected": { "accepted": false, "reason": "unknown_field" }
+    },
+    {
+      "id": "event-array-failure-code",
+      "surface": "event",
+      "purpose": "reject non-string enum fields without leaking native exceptions",
+      "frame": "{\"protocol_version\":2,\"type\":\"failed\",\"code\":[]}",
+      "expected": {
+        "accepted": false,
+        "reason": "invalid_field"
+      }
+    },
+    {
+      "id": "command-array-role",
+      "surface": "command",
+      "purpose": "reject non-string enum fields without leaking native exceptions",
+      "frame": "{\"protocol_version\":2,\"type\":\"generate\",\"generation_id\":\"x\",\"epoch\":1,\"messages\":[{\"role\":[],\"text\":\"hello\"}]}",
+      "expected": {
+        "accepted": false,
+        "reason": "invalid_field"
+      }
     }
   ]
 }

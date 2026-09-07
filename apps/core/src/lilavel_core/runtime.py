@@ -458,6 +458,7 @@ class ModelRuntime:
         self._failure: ModelRuntimeError | None = None
         self._shutdown_requested = False
         self._shutdown_event_seen = False
+        self._reader_eof = False
         self._process_exit_code: int | None = None
         self._last_cancel: tuple[str, int] | None = None
 
@@ -767,6 +768,9 @@ class ModelRuntime:
                 containment_ok = _close_ownership(containment)
             elif containment is not None:
                 containment_ok = _close_ownership(containment) and containment_ok
+            reader = self._reader_thread
+            if reader is not None:
+                reader.join(timeout=max(0.0, deadline - time.monotonic()))
             _close_pipes(process)
         else:
             exit_code = None
@@ -797,6 +801,8 @@ class ModelRuntime:
                     shutdown_failure = SidecarCrashed("sidecar process was unavailable")
                 elif exit_code != 0:
                     shutdown_failure = SidecarCrashed("sidecar exited abnormally during shutdown")
+                elif not self._reader_eof:
+                    shutdown_failure = SidecarCrashed("sidecar reader did not reach valid EOF")
                 elif not shutdown_ack:
                     shutdown_failure = SidecarCrashed(
                         "sidecar exited without shutdown acknowledgement"
@@ -874,15 +880,20 @@ class ModelRuntime:
                 raise OSError("sidecar input pipe failed") from failure[0]
 
     def _read_stdout(self, stream: BinaryIO) -> None:
+        reached_eof = False
         try:
             for frame in _iter_frames(stream):
                 self._dispatch(parse_event(frame))
+            reached_eof = True
         except ProtocolError as error:
             self._fail_runtime(ProtocolViolation(f"invalid sidecar protocol: {error.reason}"))
-        except (OSError, ValueError) as error:
+        except BaseException as error:
+            # This background thread is a containment boundary: no unexpected
+            # exception (including thread termination) may certify shutdown.
             self._fail_runtime(SidecarCrashed(f"sidecar output failed: {error.__class__.__name__}"))
         finally:
             with self._lock:
+                self._reader_eof = reached_eof
                 expected_shutdown = self._shutdown_requested
                 process = self._process
                 self._process_exit_code = process.poll() if process is not None else None
@@ -921,7 +932,6 @@ class ModelRuntime:
                     self._fail_runtime_locked(ProtocolViolation("unexpected shutdown event"))
                     return
                 self._shutdown_event_seen = True
-                self._shutdown_complete.set()
             return
         if isinstance(event, GenerationFailedEvent) and event.generation_id is None:
             with self._lock:

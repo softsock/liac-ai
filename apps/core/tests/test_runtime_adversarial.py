@@ -266,3 +266,51 @@ def test_shutdown_timeout_settles_pending_handle_with_shutdown_code() -> None:
         assert failures[0].code == "shutdown_timeout"
     finally:
         model.shutdown()
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_malformed_frame_after_shutdown_ack_fails_closed(
+    attempt: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = runtime(FIXTURE, "malformed-after-shutdown")
+    original = runtime_module.parse_event
+
+    def parse_after_exit(payload: bytes | str) -> runtime_module.GenerationEvent:
+        if b'"failed"' in (payload.encode() if isinstance(payload, str) else payload):
+            process = model._process  # pyright: ignore[reportPrivateUsage]
+            assert process is not None
+            assert process.wait(timeout=2.0) == 0
+        return original(payload)
+
+    monkeypatch.setattr(runtime_module, "parse_event", parse_after_exit)
+    model.start()
+    with pytest.raises(runtime_module.ProtocolViolation):
+        model.shutdown()
+    assert model.health().state == "failed"
+    assert not model.ready
+    with pytest.raises(runtime_module.ModelRuntimeError):
+        model.generate(ModelRequest("must not reuse"))
+    model.shutdown()
+
+
+@pytest.mark.parametrize("error_type", [TypeError, RuntimeError, SystemExit])
+def test_unexpected_reader_exception_after_ack_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    original = runtime_module.parse_event
+
+    def parse_with_failure(payload: bytes | str) -> runtime_module.GenerationEvent:
+        if b'"failed"' in (payload.encode() if isinstance(payload, str) else payload):
+            raise error_type("synthetic reader failure")
+        return original(payload)
+
+    monkeypatch.setattr(runtime_module, "parse_event", parse_with_failure)
+    model = runtime(FIXTURE, "malformed-after-shutdown")
+    model.start()
+    with pytest.raises(SidecarCrashed, match=error_type.__name__):
+        model.shutdown()
+    assert model.health().state == "failed"
+    assert not model.ready
+    model.shutdown()
