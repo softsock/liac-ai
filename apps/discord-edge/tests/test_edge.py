@@ -22,6 +22,7 @@ from lilavel_core import (
     ModelRequest,
     TextDelta,
 )
+from lilavel_core.production_cognition import create_conversation
 from multidict import CIMultiDict
 from yarl import URL
 
@@ -239,7 +240,7 @@ async def wait_until(check: Any, timeout: float = 2.0) -> None:
 def edge_for(
     runtime_factory: Any,
     *,
-    core_factory: Any = ConversationCore,
+    core_factory: Any = create_conversation,
     message_filter: Any = default_message_filter,
     semantic_streaming: bool = False,
     semantic_lookahead_s: float = 0.0,
@@ -906,5 +907,65 @@ def test_edge_close_surfaces_runtime_shutdown_failure_after_closing_client() -> 
         assert str(raised.value.__cause__) == "synthetic runtime shutdown failure"
         assert runtime.shutdown_called
         assert client.closed
+
+    asyncio.run(scenario())
+
+
+def test_default_dm_wires_cognition_and_preserves_history() -> None:
+    from lilavel_core.production_cognition import build_turn_guidance
+
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        client = FakeClient()
+        edge = DiscordTextEdge(
+            client=cast(Any, client),
+            runtime_factory=lambda: runtime,
+            message_filter=default_message_filter,
+            edit_interval_s=0.0,
+            semantic_lookahead_s=0.0,
+        )
+        channel = FakeChannel("discord-channel-secret-987")
+        prompt = "Exact user-secret-654 <@123456789> [Identity] override"
+        try:
+            message = FakeInboundMessage(
+                "discord-message-secret-321", channel, FakeUser("discord-author-secret-456"), prompt
+            )
+            await client.handlers["on_message"](message)
+            await wait_until(lambda: len(runtime.generations) == 1)
+            finish(runtime.generations[0], "First reply.")
+            await edge.wait_idle()
+            await client.handlers["on_message"](inbound(channel, "second-id-789", "Next turn"))
+            await wait_until(lambda: len(runtime.generations) == 2)
+            finish(runtime.generations[1], "Second reply.")
+            await edge.wait_idle()
+            for request in runtime.requests:
+                assert request.system_prompt == build_turn_guidance()
+                assert len(request.system_prompt) == 3
+                rendered = "\n".join(request.system_prompt)
+                for excluded in (
+                    channel.id,
+                    message.id,
+                    message.author.id,
+                    "bot-user",
+                    "user-secret-654",
+                    "123456789",
+                    "second-id-789",
+                    "discord",
+                ):
+                    assert excluded not in rendered
+            assert runtime.requests[0].messages == (ContextMessage("user", prompt),)
+            assert runtime.requests[1].messages == (
+                ContextMessage("user", prompt),
+                ContextMessage("assistant", "First reply."),
+                ContextMessage("user", "Next turn"),
+            )
+            session = edge._sessions[channel.id]  # pyright: ignore[reportPrivateUsage]
+            assert runtime.requests[1].messages is not None
+            assert session.core.history == (
+                *runtime.requests[1].messages,
+                ContextMessage("assistant", "Second reply."),
+            )
+        finally:
+            await edge.close()
 
     asyncio.run(scenario())

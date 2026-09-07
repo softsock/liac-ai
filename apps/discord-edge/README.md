@@ -39,6 +39,11 @@ resume event actually occurred, but does not manufacture a disconnect.
 
 ## Stage B: Core-backed DM edge
 
+Normal DM sessions use Core-owned `production_cognition.create_conversation`.
+Every turn receives the experimental A/B/C identity plus neutral current behavior
+controls. This is a wiring control, not final Character v0 or a scenario classifier.
+Injected custom `core_factory` values remain responsible for their own guidance.
+
 ```powershell
 uv run --locked python scripts/run_edge.py
 ```

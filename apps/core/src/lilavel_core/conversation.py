@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from queue import Queue
 from threading import Event, Lock, RLock, Thread
@@ -624,14 +624,16 @@ class ConversationCore:
         runtime: ConversationRuntime,
         *,
         composer: ConversationContextComposer | None = None,
-        trusted_guidance: Sequence[str] = (),
+        trusted_guidance: Sequence[str] | Callable[[], Sequence[str]] = (),
         scope_id: str | None = None,
         store: ConversationStore | None = None,
         runtime_evidence_capacity: int = RUNTIME_EVIDENCE_CAPACITY,
     ) -> None:
         self._runtime = runtime
         self._composer = composer or FullHistoryContextComposer()
-        self._trusted_guidance = tuple(trusted_guidance)
+        self._trusted_guidance = (
+            trusted_guidance if callable(trusted_guidance) else tuple(trusted_guidance)
+        )
         self._lock = RLock()
         self._runtime_evidence = _RuntimeEvidenceTrace(runtime_evidence_capacity)
         self._store = store or SQLiteConversationStore(":memory:")
@@ -738,7 +740,9 @@ class ConversationCore:
                 ContextMessage(message.role, message.text) for message in self._canonical_messages
             )
         composed = tuple(self._composer.compose(history))
-        return ModelRequest(messages=composed, system_prompt=self._trusted_guidance)
+        guidance = self._trusted_guidance
+        blocks = tuple(guidance()) if callable(guidance) else guidance
+        return ModelRequest(messages=composed, system_prompt=blocks)
 
     def publish_delta(
         self,

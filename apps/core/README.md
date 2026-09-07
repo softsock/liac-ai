@@ -181,6 +181,12 @@ Callers must derive it only from trusted, application-owned semantic fixtures;
 Provider metadata, session state, tools, and transport details remain outside
 this layer.
 
+Production composition lives in `production_cognition.py`. It preserves the A/B/C
+experimental identity and builds neutral `WorkingState` / `ResponseDisposition`
+through the existing compiler for every model request. `trusted_guidance` accepts
+either static blocks or an application-owned zero-argument builder. The builder
+receives no user text or transport metadata; it adds nothing to canonical history.
+
 ## Local canonical persistence and raw evidence
 
 `ConversationCore` uses a narrow `ConversationStore` boundary. The default

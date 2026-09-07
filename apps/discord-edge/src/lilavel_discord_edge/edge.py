@@ -24,6 +24,7 @@ from lilavel_core import (
     ConversationTextDelta,
     ModelRuntime,
 )
+from lilavel_core.production_cognition import create_conversation
 
 from .diagnostics import (
     DiscordDiagnostics,
@@ -193,7 +194,7 @@ class DiscordTextEdge:
         *,
         client: discord.Client | None = None,
         runtime_factory: RuntimeFactory = ModelRuntime,
-        core_factory: CoreFactory = ConversationCore,
+        core_factory: CoreFactory = create_conversation,
         message_filter: MessageFilter = is_direct_message,
         token_provider: Callable[[], str | None] = read_discord_token,
         edit_interval_s: float = DEFAULT_EDIT_INTERVAL_S,

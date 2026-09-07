@@ -92,3 +92,33 @@ def test_abcs_behavioral_finding_remains_reviewable() -> None:
     }
 
     assert namespace["_row_valid"](row)
+
+
+def test_production_preserves_ab_identity_and_rebuilds_guidance() -> None:
+    from typing import Any, cast
+
+    from lilavel_core import ContextMessage, ConversationCore
+    from lilavel_core.persistence import SQLiteConversationStore
+    from lilavel_core.production_cognition import EXPERIMENTAL_IDENTITY, build_turn_guidance
+
+    namespace = runpy.run_path(str(Path(__file__).parents[1] / "scripts" / "cognition_ab.py"))
+    assert namespace["CANON"] is EXPERIMENTAL_IDENTITY
+    calls: list[int] = []
+
+    def builder() -> tuple[str, ...]:
+        calls.append(1)
+        return build_turn_guidance()
+
+    store = SQLiteConversationStore(":memory:")
+    store.append_user_message(scope_id="test", message_id="user-1", text="hello")
+    core = ConversationCore(cast(Any, None), trusted_guidance=builder, store=store, scope_id="test")
+    expected = compile_guidance(
+        EXPERIMENTAL_IDENTITY,
+        state=WorkingState("respond to the current user turn"),
+        disposition=ResponseDisposition(),
+    )
+    assert core.build_model_request().system_prompt == expected
+    assert core.build_model_request().system_prompt == expected
+    assert len(expected) == 3
+    assert calls == [1, 1]
+    assert core.history == (ContextMessage("user", "hello"),)
