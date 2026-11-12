@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from contextlib import aclosing, suppress
+from time import perf_counter
 from typing import Literal
 
 from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage
@@ -19,7 +20,8 @@ TERMINAL_OUTPUTS: dict[str, OutputKind] = {
 
 class Runtime:
     def __init__(self, character_id: str, journal: Journal, fast: FastMind, deep: DeepMind,
-                 output: OutputSink, *, deep_timeout: float = 30.0) -> None:
+                 output: OutputSink, *, deep_timeout: float = 30.0,
+                 fast_diagnostics: dict[str, object] | None = None) -> None:
         self.character_id = character_id
         self.journal = journal
         self.fast = fast
@@ -27,6 +29,8 @@ class Runtime:
         self.output = output
         self.deep_timeout = deep_timeout
         self.deep_error: str | None = None
+        self.fast_diagnostics = fast_diagnostics if fast_diagnostics is not None else {}
+        self.last_cancellation_ms: float | None = None
         self._wake = asyncio.Event()
         self._input_lock = asyncio.Lock()
         self._fast_task: asyncio.Task[None] | None = None
@@ -126,12 +130,16 @@ class Runtime:
     async def _cancel_fast(self, reason: str) -> None:
         if self._fast_task is not None:
             task, self._fast_task = self._fast_task, None
+            was_active = not task.done()
+            start = perf_counter()
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
             # A task cancelled before its first instruction cannot run its own cleanup.
             if self._current is not None:
                 self._finish(*self._current, "cancelled", reason=reason)
+            if was_active:
+                self.last_cancellation_ms = round((perf_counter() - start) * 1000, 2)
 
     def retry_deep(self) -> None:
         if self._stopping or not self._started:

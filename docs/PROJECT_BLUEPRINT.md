@@ -294,7 +294,11 @@ Inputs: `IdentitySnapshot`, `WorkingState`, `ActiveBeat[]`, `RecentTurn[]`, `Pin
 
 These are budget guidelines, not fixed allocations; actual tokenization and prompt compatibility are model dependent. If over budget, evict expired notes and low-ranked retrieved context first; **never discard the current user correction, critical constraints or the current input**. Select deterministic order of sections to maximize stable-prefix KV reuse where supported. Since exact cache behavior varies, measure prompt-processing latency at 2K, 8K and 16K rather than assume caching.
 
+For M1's available blocks, the decided order is identity → retained exact history → quoted runtime state/note → current input. Selection and output reserve remain unchanged; future segments above are not yet implemented.
+
 ### 7.3 Fast is not a permanent LM Studio session
+
+**DECIDED (M1, 2026-11-12):** Compile identity → retained exact history → quoted runtime state/note → current input. Updating a note/revision leaves the identity/history prefix unchanged when the retained history stays identical; a longer note can evict history under budget pressure. Keep newest-20-event selection and whole-message eviction; window shifts can still invalidate most of the prefix. Cache availability must not change correctness.
 
 Each turn explicitly supplies all model messages. No reliance on server-maintained chat session or prior completion state. Model process and KV caching may persist for performance, but they are **not the source of state**. Use model name/config through environment; inspect compatibility of `enable_thinking: false` and `conversational_mode: true` with the actual LM Studio GGUF backend. If the API silently ignores those flags, fail capability verification rather than assert reasoning is off.
 
@@ -904,7 +908,9 @@ Can a single serialized persistent OMP session handle observation and context pa
 
 ### OQ-04: Context latency [BLOCKER to M1 acceptance]
 
-Is ~16K a good working budget or too slow on RTX 5070 Ti? Collect actual TTFT/preprocessing benchmarks and quality at different context sizes. Change budget by evidence.
+Is ~16K a good working budget or too slow on RTX 5070 Ti? Collect actual TTFT/preprocessing benchmarks and quality at 2K, 8K and near-16K input sizes (reserve output space). Report exact backend input tokens separately from compiler estimates, TTFT, available prompt-evaluation/cache counters and unavailable measurements. Timing alone does not prove KV reuse. Distinguish transport-only size probes from production compiler behavior. Change budget by evidence; no latency SLO is established yet.
+
+**EXPERIMENT (2026-11-12):** [M1 follow-up](M1_IMPLEMENTATION.md#m1-context-cache-follow-up--2026-11-12) measured 2060–2080, 8204–8224 and 15463–15483 actual input tokens with runtime prompt-evaluation counters. Note updates evaluated 22 tokens with the new order versus the full input with the old order; rolling-window shifts still evaluated the full input. Explicit cached-token counts were unavailable. The latency evidence gap is covered for this configuration. OQ-04 remains open for long-context answer quality and the production compiler's substantial underfill; no new budget/window policy is decided.
 
 ### OQ-05: Memory architecture [BLOCKER to M3 choice]
 
