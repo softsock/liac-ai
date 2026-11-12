@@ -2,6 +2,13 @@ from typing import AsyncGenerator, Protocol
 
 from vtuber.contracts.events import Event, RuntimeOutput, UserMessage
 from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal
+from vtuber.contracts.context import CompactionProposal
+
+
+class ContextPolicy(Protocol):
+    def prepare_epoch(self, snapshot: FastSnapshot, message: UserMessage) -> CompactionProposal | None: ...
+
+    def validate_compaction(self, snapshot: FastSnapshot, proposal: CompactionProposal) -> None: ...
 
 
 class FastMind(Protocol):

@@ -15,6 +15,7 @@ from vtuber.context import ContextCompiler
 from vtuber.contracts.protocols import FastMind, OutputSink
 from vtuber.minds.fake import FakeDeep, FakeFast
 from vtuber.minds.lmstudio import LMStudioFast, LMStudioSettings
+from vtuber.minds.nemotron import NemotronTokenCounter
 from vtuber.runtime.journal import Journal
 from vtuber.runtime.orchestrator import Runtime
 
@@ -30,6 +31,7 @@ class Config:
     lmstudio: LMStudioSettings = field(default_factory=LMStudioSettings)
     context_tokens: int = 16384
     identity: Path | None = None
+    tokenizer: Path = Path(".data/tokenizers/nemotron.json")
 
     def __post_init__(self) -> None:
         if not self.character_id.strip():
@@ -68,14 +70,18 @@ async def open_runtime(config: Config, output: OutputSink) -> AsyncIterator[Runt
     async with AsyncExitStack() as stack:
         diagnostics: dict[str, object] = {"backend": config.fast_backend}
         fast: FastMind = FakeFast(config.fast_delay)
+        identity = (config.identity.read_text(encoding="utf-8") if config.identity else
+                    files("vtuber.minds").joinpath("character.md").read_text(encoding="utf-8"))
+        compiler = ContextCompiler(identity, config.context_tokens, config.lmstudio.max_output_tokens)
         if config.fast_backend == "lmstudio":
-            identity = (config.identity.read_text(encoding="utf-8") if config.identity else
-                        files("vtuber.minds").joinpath("character.md").read_text(encoding="utf-8"))
-            compiler = ContextCompiler(identity, config.context_tokens, config.lmstudio.max_output_tokens)
+            compiler = ContextCompiler(identity, config.context_tokens, config.lmstudio.max_output_tokens,
+                                       NemotronTokenCounter(config.tokenizer))
             client = await stack.enter_async_context(http_client(config.lmstudio))
             fast = LMStudioFast(client, compiler, config.lmstudio, diagnostics)
+            await fast.verify_token_count()
         journal = Journal(config.db)
         stack.callback(journal.close)
         runtime = await stack.enter_async_context(Runtime(config.character_id, journal, fast,
-            FakeDeep(config.deep_delay), output, deep_timeout=config.deep_timeout, fast_diagnostics=diagnostics))
+            FakeDeep(config.deep_delay), output, deep_timeout=config.deep_timeout,
+            fast_diagnostics=diagnostics, context_policy=compiler))
         yield runtime

@@ -7,7 +7,8 @@ from time import perf_counter
 from typing import Literal
 
 from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage
-from vtuber.contracts.protocols import DeepMind, FastMind, OutputSink
+from vtuber.contracts.protocols import ContextPolicy, DeepMind, FastMind, OutputSink
+from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextBudgetExceeded
 from vtuber.contracts.state import FastSnapshot, NoteProposal
 from vtuber.runtime.journal import Journal
 
@@ -21,13 +22,15 @@ TERMINAL_OUTPUTS: dict[str, OutputKind] = {
 class Runtime:
     def __init__(self, character_id: str, journal: Journal, fast: FastMind, deep: DeepMind,
                  output: OutputSink, *, deep_timeout: float = 30.0,
-                 fast_diagnostics: dict[str, object] | None = None) -> None:
+                 fast_diagnostics: dict[str, object] | None = None,
+                 context_policy: ContextPolicy | None = None) -> None:
         self.character_id = character_id
         self.journal = journal
         self.fast = fast
         self.deep = deep
         self.output = output
         self.deep_timeout = deep_timeout
+        self.context_policy = context_policy
         self.deep_error: str | None = None
         self.fast_diagnostics = fast_diagnostics if fast_diagnostics is not None else {}
         self.last_cancellation_ms: float | None = None
@@ -75,18 +78,61 @@ class Runtime:
                 return self._fast_task if self._current and self._current[0].event_id == message.event_id else None
             self._wake.set()
             await self._cancel_fast("superseded")
-            snapshot = FastSnapshot(self.journal.snapshot(self.character_id),
-                self.journal.high_watermark(self.character_id),
-                self.journal.recent_dialogue(self.character_id))
+            snapshot = self.journal.fast_snapshot(self.character_id)
+            error = None
+            start = perf_counter()
+            try:
+                if self.context_policy is not None:
+                    proposal = self.context_policy.prepare_epoch(snapshot, message)
+                    if proposal is not None:
+                        result = self.apply_compaction(proposal)
+                        if not result.accepted:
+                            raise ValueError(f"Local compaction rejected: {result.reason}")
+                        snapshot = self.journal.fast_snapshot(self.character_id)
+            except ContextBudgetExceeded as caught:
+                error = caught
+            self.fast_diagnostics["preparation_ms"] = round((perf_counter() - start) * 1000, 3)
             self.journal.append(Event.create(self.character_id, "character.reply.started",
                 {"snapshot_revision": snapshot.state.revision,
-                 "through_sequence": snapshot.through_sequence},
+                 "through_sequence": snapshot.through_sequence, "epoch_version": snapshot.epoch.version,
+                 "compacted_through_sequence": snapshot.epoch.compacted_through_sequence},
                 event_id=f"reply_started_{message.event_id}", turn_id=message.turn_id,
                 causation_id=message.event_id))
             self._current = message, snapshot
+            if error is not None:
+                self.fast_diagnostics.pop("context", None)
+                self.fast_diagnostics["generation"] = {"turn_id": message.turn_id, "status": "failed",
+                    "error": type(error).__name__}
+                self._emit(RuntimeOutput("reply.started", self.character_id, snapshot.state.revision, message.turn_id))
+                self._finish(message, snapshot, "failed", reason=type(error).__name__)
+                return None
             self._fast_task = asyncio.create_task(self._run_fast(message, snapshot), name=f"vtuber-fast-{message.turn_id}")
             self._fast_task.add_done_callback(self._observe_task)
             return self._fast_task
+
+    def apply_compaction(self, proposal: CompactionProposal) -> CompactionResult:
+        if not self._started or self._stopping:
+            raise RuntimeError("Runtime is not running")
+        if proposal.character_id != self.character_id:
+            raise ValueError("Compaction belongs to another character")
+        snapshot = self.journal.fast_snapshot(self.character_id)
+        replay = self.journal.get(f"compaction_{proposal.proposal_id}") is not None
+        if (not replay and self.context_policy is not None
+                and proposal.based_on_epoch == snapshot.epoch.version
+                and proposal.based_on_revision == snapshot.state.revision):
+            self.context_policy.validate_compaction(snapshot, proposal)
+        result = self.journal.apply_compaction(proposal)
+        if result.accepted and not replay:
+            covered = tuple(dict.fromkeys([
+                *(s for item in snapshot.epoch.items for s in item.source_event_ids),
+                *(e.event_id for e in snapshot.recent_dialogue
+                  if e.sequence <= proposal.compacted_through_sequence)]))
+            retained = {s for item in proposal.items for s in item.source_event_ids}
+            omitted = tuple(s for s in covered if s not in retained)
+            self.fast_diagnostics["last_compaction"] = {"epoch_version": result.epoch_version,
+                "covered_source_count": len(covered), "retained_source_count": len(retained),
+                "omitted_source_count": len(omitted), "omitted_source_ids": omitted[:32]}
+        return result
 
     def _finish(self, message: UserMessage, snapshot: FastSnapshot,
                 status: Literal["completed", "cancelled", "failed"],

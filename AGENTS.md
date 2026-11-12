@@ -8,11 +8,11 @@ Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation 
 
 ## Build, Test, and Development Commands
 
-Use Python 3.12+ and a virtual environment. HTTPX is the only direct runtime dependency; no formatter or linter is configured.
+Use Python 3.12+ and a virtual environment. HTTPX is the only core direct runtime dependency; real Fast also uses optional `.[nemotron]`. No formatter or linter is configured.
 
 - `python -m pip install -e .` — install the package in the active environment.
 - `python -m vtuber` — run the fake-backed CLI.
-- `python -m vtuber --fast-backend lmstudio --endpoint URL --model ID` — stream from loaded Nemotron; see README setup.
+- `python -m vtuber --fast-backend lmstudio --endpoint URL --model ID --tokenizer PATH` — stream from loaded Nemotron; see README for the pinned tokenizer.
 - `python -m unittest discover -s tests -v` — run critical invariant checks.
 - `git diff --check` and `git status --short` — inspect whitespace and changed/untracked files.
 

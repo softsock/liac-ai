@@ -9,6 +9,9 @@ description = "Autonomous AI VTuber character runtime"
 requires-python = ">=3.12"
 dependencies = ["httpx>=0.28,<0.29"]
 
+[project.optional-dependencies]
+nemotron = ["tokenizers==0.22.2"]
+
 [project.scripts]
 vtuber = "vtuber.cli:main"
 
