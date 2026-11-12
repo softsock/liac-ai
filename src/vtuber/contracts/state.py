@@ -1,6 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from vtuber.contracts.events import CharacterId, Event, EventId
+from vtuber.contracts.context import ContextEpoch
+
+from vtuber.contracts.events import CharacterId, Event, EventId, TurnId
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,8 @@ class FastSnapshot:
     state: CharacterState
     through_sequence: int
     recent_dialogue: tuple[Event, ...]
+    epoch: ContextEpoch = field(default_factory=ContextEpoch)
+    terminal_turns: tuple[tuple[TurnId, int], ...] = ()
 
 
 @dataclass(frozen=True)

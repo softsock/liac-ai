@@ -296,9 +296,23 @@ These are budget guidelines, not fixed allocations; actual tokenization and prom
 
 For M1's available blocks, the decided order is identity → retained exact history → quoted runtime state/note → current input. Selection and output reserve remain unchanged; future segments above are not yet implemented.
 
+**DECIDED (M1.5, 2026-11-12):** Supersede M1's newest-20 rolling selection and byte
+heuristic. Order identity → frozen quoted epoch extracts → growing exact history
+→ quoted active state/note → current input. Count the full rendered Nemotron
+template locally with the pinned tokenizer, plus one backend BOS; startup verifies
+provider parity. Reserve 512 output + 32 margin from 16384, leaving 15840 input.
+Never truncate identity, active note or current input; reject required overflow.
+
 ### 7.3 Fast is not a permanent LM Studio session
 
 **DECIDED (M1, 2026-11-12):** Compile identity → retained exact history → quoted runtime state/note → current input. Updating a note/revision leaves the identity/history prefix unchanged when the retained history stays identical; a longer note can evict history under budget pressure. Keep newest-20-event selection and whole-message eviction; window shifts can still invalidate most of the prefix. Cache availability must not change correctness.
+
+**DECIDED (M1.5):** The preceding M1 selection policy is historical. Within an
+epoch the compacted block is immutable and exact history grows without sliding.
+Near 90% input utilization, Runtime atomically commits a new SQLite epoch before
+freezing the next Fast snapshot. Changes while Fast streams affect subsequent
+snapshots only. Keep stateless requests and correctness independent of cache.
+The wire template omits literal BOS because the verified backend supplies it.
 
 Each turn explicitly supplies all model messages. No reliance on server-maintained chat session or prior completion state. Model process and KV caching may persist for performance, but they are **not the source of state**. Use model name/config through environment; inspect compatibility of `enable_thinking: false` and `conversational_mode: true` with the actual LM Studio GGUF backend. If the API silently ignores those flags, fail capability verification rather than assert reasoning is off.
 
@@ -420,6 +434,16 @@ Priority order: explicit user correction / deletion > safety and permissions > s
 ### 9.4 Context compaction protocol
 
 Deep sends targeted note/memory operations, **not** wholesale replacement of Fast history. The compiler owns eviction using budgets. Preserve important *verbatim* recent messages, corrections and pending task outcomes. A summary is a **projection with source range and version**, never a replacement for Journal. Summaries must distinguish confirmed events, interpretations and subjective fictional attitude.
+
+**DECIDED (M1.5):** A typed `CompactionProposal` names its base epoch, note revision,
+observed watermark, compacted cutoff and attributed items. Runtime checks local
+item budget; Journal validates provenance and terminal-turn boundaries, CASes the
+bases and atomically records the next epoch plus decision. Late proposals preserve
+newer exact events; stale bases reject without rebasing. Raw events and Deep cursor
+are unchanged. Deterministic fallback keeps an oldest-user anchor, recent extracts
+(2048-token block, 256-token/item cap) and up to three whole recent turns within
+2048 tokens. Extracts are incomplete projections, not a guarantee of remembering
+all important facts. Semantic Luna selection remains M2/FUTURE.
 
 A forgotten item can be restored from Luna's still-relevant context or from Memory/Journal asynchronously. It may arrive too late for the current Fast reply; system must not falsely guarantee zero-delay remembrance. Add cached memory retrieval to Fast only if it is demonstrably low-latency; otherwise keep it off critical path.
 
@@ -778,6 +802,16 @@ Deliver: project structure, typed event envelope, minimal CharacterState, SQLite
 
 Deliver: LM Studio adapter, Nemotron capability probe for no-reasoning, `ContextCompiler`, CLI streaming/cancel, baseline `CHARACTER.md` and realistic persona tests. **Exit:** recognizable character with stable stateless turn behavior, measured first-token latency and clean restarts.
 
+### M1.5 – Context lifecycle and KV cache [BETWEEN M1 AND M2]
+
+Deliver: persisted atomic context epochs, validated asynchronous compaction port,
+locally verified token budgeting, single-BOS stateless template, CLI diagnostics
+and live cache/TTFT/retention measurements. **Exit:** sequential production turns
+reach near-limit utilization, epochs and retained evidence survive restart, Fast
+snapshots stay immutable during Deep/compaction and cancellation remains clean.
+See [M1.5 results and limits](M1_5_IMPLEMENTATION.md). Full semantic memory and
+Luna/OMP integration are outside this milestone.
+
 ### M2 – Background Luna/Context Patch [THIRD]
 
 Deliver: OMP RPC adapter, persistent `DeepInbox` cursor, asynchronous batch consumption, typed `context.note` and `performance.beat` proposals, validation and expiry, developer trace. **Exit:** Fast never waits for Luna, concrete beat reaches later Fast turn, all failure/replay scenarios T01–T06 pass.
@@ -911,6 +945,13 @@ Can a single serialized persistent OMP session handle observation and context pa
 Is ~16K a good working budget or too slow on RTX 5070 Ti? Collect actual TTFT/preprocessing benchmarks and quality at 2K, 8K and near-16K input sizes (reserve output space). Report exact backend input tokens separately from compiler estimates, TTFT, available prompt-evaluation/cache counters and unavailable measurements. Timing alone does not prove KV reuse. Distinguish transport-only size probes from production compiler behavior. Change budget by evidence; no latency SLO is established yet.
 
 **EXPERIMENT (2026-11-12):** [M1 follow-up](M1_IMPLEMENTATION.md#m1-context-cache-follow-up--2026-11-12) measured 2060–2080, 8204–8224 and 15463–15483 actual input tokens with runtime prompt-evaluation counters. Note updates evaluated 22 tokens with the new order versus the full input with the old order; rolling-window shifts still evaluated the full input. Explicit cached-token counts were unavailable. The latency evidence gap is covered for this configuration. OQ-04 remains open for long-context answer quality and the production compiler's substantial underfill; no new budget/window policy is decided.
+
+**DECIDED/EXPERIMENT (M1.5):** The policy above is superseded by local tokenizer
+budgeting and durable epochs. [M1.5 report](M1_5_IMPLEMENTATION.md) separates actual
+production utilization/recall from transport controls and records transition
+prefill costs. Explicit cached-token counters remain unavailable. Small synthetic
+recall checks do not close broad long-context/persona quality acceptance; epoch
+extraction can lose old facts, and semantic memory remains future work.
 
 ### OQ-05: Memory architecture [BLOCKER to M3 choice]
 

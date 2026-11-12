@@ -4,12 +4,90 @@ import unittest
 from pathlib import Path
 
 from vtuber.contracts.events import UserMessage
+from vtuber.contracts.context import CompactionProposal, ContextItem
+from vtuber.contracts.state import NoteProposal
+from vtuber.context import ContextCompiler
 from vtuber.minds.fake import FakeDeep, FakeFast
 from vtuber.runtime.journal import Journal
 from vtuber.runtime.orchestrator import Runtime
 
 
 class RuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_epoch_and_note_updates_do_not_mutate_active_fast_snapshot(self):
+        entered, resume = asyncio.Event(), asyncio.Event()
+        captured = []
+        class StalledFast:
+            async def stream(self, snapshot, message):
+                captured.append(snapshot)
+                if len(captured) == 2:
+                    entered.set()
+                    await resume.wait()
+                yield 'reply'
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Journal(Path(folder) / 'runtime.sqlite3')
+            try:
+                compiler = ContextCompiler('Identity')
+                async with Runtime('primary', journal, StalledFast(), FakeDeep(100), lambda _: None,
+                                   context_policy=compiler) as runtime:
+                    first = UserMessage('anchor')
+                    await (await runtime.submit(first))
+                    cutoff = journal.high_watermark('primary')
+                    second = UserMessage('second')
+                    task = await runtime.submit(second)
+                    await entered.wait()
+                    original = captured[-1]
+                    original_hash = compiler.compile(original, second).metadata()['sha256']
+                    journal.apply_note(NoteProposal('note', 'primary', 0, cutoff, (first.event_id,), 'updated note'))
+                    proposal = CompactionProposal('async', 'primary', 0, 1, cutoff, cutoff,
+                                                  (ContextItem('anchor', (first.event_id,)),))
+                    self.assertTrue(runtime.apply_compaction(proposal).accepted)
+                    self.assertEqual(runtime.fast_diagnostics['last_compaction']['omitted_source_count'], 1)
+                    self.assertEqual(captured[-1], original)
+                    self.assertEqual(compiler.compile(captured[-1], second).metadata()['sha256'], original_hash)
+                    resume.set()
+                    await task
+                    await (await runtime.submit(UserMessage('third')))
+                    self.assertEqual((captured[-1].epoch.version, captured[-1].state.revision), (1, 1))
+            finally:
+                journal.close()
+
+    async def test_epoch_pressure_restart_and_rejected_input_have_terminal_events(self):
+        captured = []
+        class Fast:
+            async def stream(self, snapshot, message):
+                captured.append(snapshot)
+                yield 'READY'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'runtime.sqlite3'
+            journal = Journal(path)
+            compiler = ContextCompiler('Identity', 2400, 100)
+            try:
+                async with Runtime('primary', journal, Fast(), FakeDeep(100), lambda _: None,
+                                   context_policy=compiler) as runtime:
+                    for i in range(24):
+                        task = await runtime.submit(UserMessage(f'fact {i} ' + 'garden ' * 30))
+                        self.assertIsNotNone(task)
+                        await task
+                    epoch = journal.context_epoch('primary')
+                    self.assertGreaterEqual(epoch.version, 2)
+                journal.close()
+                journal = Journal(path)
+                self.assertEqual(journal.context_epoch('primary'), epoch)
+                async with Runtime('primary', journal, Fast(), FakeDeep(100), lambda _: None,
+                                   context_policy=compiler) as runtime:
+                    await (await runtime.submit(UserMessage('after restart')))
+                    self.assertEqual(captured[-1].epoch.version, epoch.version)
+                    before, calls = journal.context_epoch('primary'), len(captured)
+                    oversized = UserMessage('я' * 3000)
+                    self.assertIsNone(await runtime.submit(oversized))
+                    self.assertEqual(journal.get(f'reply_terminal_{oversized.event_id}').payload['reason'], 'ContextBudgetExceeded')
+                    self.assertEqual(journal.context_epoch('primary'), before)
+                    self.assertEqual(len(captured), calls)
+                    self.assertIsNone(await runtime.submit(oversized))
+                    self.assertEqual(journal.unfinished_replies('primary'), ())
+            finally:
+                journal.close()
+
     async def test_cancelled_adapter_cannot_finish_as_completed(self):
         entered = asyncio.Event()
 

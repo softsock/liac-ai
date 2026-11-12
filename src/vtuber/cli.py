@@ -15,7 +15,7 @@ import httpx
 
 from vtuber.app import Config, list_models, open_runtime
 from vtuber.contracts.events import RuntimeOutput, UserMessage, canonical_json
-from vtuber.minds.lmstudio import LMStudioSettings
+from vtuber.minds.lmstudio import LMStudioSettings, StreamProtocolError
 
 
 async def input_lines() -> AsyncIterator[str]:
@@ -113,6 +113,7 @@ async def run(config: Config) -> None:
         print(HELP, flush=True)
         async with aclosing(input_lines()) as lines:
             async for line in lines:
+                user_text = line
                 line = line.strip()
                 if not line:
                     continue
@@ -127,6 +128,8 @@ async def run(config: Config) -> None:
                         "deep_cursor": runtime.journal.cursor(config.character_id),
                         "journal_sequence": runtime.journal.high_watermark(config.character_id),
                         "deep_error": runtime.deep_error,
+                        "context_epoch": {"version": runtime.journal.context_epoch(config.character_id).version,
+                            "cutoff": runtime.journal.context_epoch(config.character_id).compacted_through_sequence},
                         "fast": runtime.fast_diagnostics,
                         "last_cancellation_ms": runtime.last_cancellation_ms,
                     }), flush=True)
@@ -134,6 +137,7 @@ async def run(config: Config) -> None:
                     print(canonical_json(runtime.fast_diagnostics.get("context", {})), flush=True)
                 elif line == "/metrics":
                     print(canonical_json({"generation": runtime.fast_diagnostics.get("generation"),
+                        "preparation_ms": runtime.fast_diagnostics.get("preparation_ms"),
                         "last_cancellation_ms": runtime.last_cancellation_ms}), flush=True)
                 elif line == "/retry":
                     runtime.retry_deep()
@@ -154,7 +158,7 @@ async def run(config: Config) -> None:
                 elif line.startswith("/"):
                     print(f"Unknown command. {HELP}", flush=True)
                 else:
-                    await runtime.submit(UserMessage(line, config.character_id))
+                    await runtime.submit(UserMessage(user_text, config.character_id))
     print("Runtime stopped; journal closed.", flush=True)
 
 
@@ -176,6 +180,7 @@ def main() -> None:
     parser.add_argument("--read-timeout", type=float, default=15.0, help="seconds without response data")
     parser.add_argument("--generation-timeout", type=float, default=45.0, help="total seconds including preflight")
     parser.add_argument("--identity", type=Path, help="UTF-8 Markdown; loaded at process start")
+    parser.add_argument("--tokenizer", type=Path, default=Config.tokenizer, help="pinned local tokenizer.json")
     parser.add_argument("--list-models", action="store_true", help="inspect server models/loaded instances and exit")
     args = parser.parse_args()
     try:
@@ -185,7 +190,7 @@ def main() -> None:
             print(canonical_json(asyncio.run(list_models(settings))))
             return
         config = Config(args.db, args.character, args.fast_delay, args.deep_delay, args.deep_timeout,
-                        args.fast_backend, settings, args.context_tokens, args.identity)
+                        args.fast_backend, settings, args.context_tokens, args.identity, args.tokenizer)
     except ValueError as error:
         parser.error(str(error))
     except (httpx.HTTPError, TimeoutError) as error:
@@ -195,5 +200,5 @@ def main() -> None:
         asyncio.run(run(config))
     except KeyboardInterrupt:
         print("\nRuntime interrupted; resources closed.")
-    except (OSError, ValueError) as error:
-        parser.exit(1, f"Runtime setup failed ({type(error).__name__}); check --identity and --db.\n")
+    except (OSError, ValueError, StreamProtocolError, httpx.HTTPError, TimeoutError) as error:
+        parser.exit(1, f"Runtime setup failed ({type(error).__name__}): {error}\n")

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from vtuber.context import ChatMessage, ContextCompiler
+from vtuber.minds.nemotron import CONTROL_MARKERS, render_nemotron
 from vtuber.contracts.events import UserMessage
 from vtuber.contracts.state import FastSnapshot
 
@@ -50,36 +51,6 @@ class LMStudioSettings:
             raise ValueError("HTTP timeouts must be finite and positive")
 
 
-# NVIDIA tokenizer_config.json, text-only expansion with enable_thinking=False,
-# conversational_mode=True. Raw /v1/completions applies no second chat template.
-SPOKEN_INSTRUCTION = ("You are having a spoken conversation with the user. Respond as briefly as possible "
-                      "while still addressing their questions fully.")
-CONTROL_MARKERS = ("<|", "<turn|>", "<channel|>", "<tool_call|>", "<tool_response|>",
-                   "<think>", "</think>", "<bos>", "<eos>")
-
-
-def render_nemotron(messages: tuple[ChatMessage, ...]) -> str:
-    if not messages or messages[0].role != "system" or messages[-1].role != "user":
-        raise ValueError("Require initial identity and final user input")
-    rendered = ["<bos>"]
-    for index, message in enumerate(messages):
-        if index and message.role == "system":
-            raise ValueError("Only one initial system message is supported")
-        content = message.content.strip()
-        # Keep literal delimiters as quoted data, including in failed-turn history.
-        for marker in CONTROL_MARKERS:
-            content = content.replace(marker, "\\u003c" + marker[1:])
-        if index == 0 and content != SPOKEN_INSTRUCTION:
-            content += "\n\n" + SPOKEN_INSTRUCTION
-        role = "model" if message.role == "assistant" else message.role
-        continuation = index > 0 and message.role == messages[index - 1].role == "assistant"
-        continues = index + 1 < len(messages) and message.role == messages[index + 1].role == "assistant"
-        rendered.append(("" if continuation else f"<|turn>{role}\n") + content +
-                        ("" if continues else "<turn|>\n"))
-    rendered.append("<|turn>model\n")
-    return "".join(rendered)
-
-
 async def sse_data(response: httpx.Response) -> AsyncGenerator[str, None]:
     data: list[str] = []
     async for line in response.aiter_lines():
@@ -110,10 +81,31 @@ class LMStudioFast:
                  settings: LMStudioSettings, diagnostics: dict[str, object]) -> None:
         self.client, self.compiler, self.settings = client, compiler, settings
         self.diagnostics = diagnostics
+        self.count_verified = False
         diagnostics.update({"backend": "lmstudio", "configuration": asdict(settings),
             "context_tokens": compiler.context_tokens, "enable_thinking": False,
             "conversational_mode": True, "template": "NVIDIA Gemma4 text-only (2026-08-20)",
             "endpoint_path": "/v1/completions"})
+
+    async def verify_token_count(self) -> None:
+        self.count_verified = False
+        counter = self.compiler.token_counter
+        if counter is None:
+            raise StreamProtocolError("Real Fast requires a local tokenizer")
+        messages = (ChatMessage("system", "Token count compatibility probe."),
+                    ChatMessage("user", "Say only READY."))
+        async with asyncio.timeout(self.settings.generation_timeout):
+            await self.check_model()
+            response = await self.client.post("/v1/completions", json={
+                "model": self.settings.model, "prompt": render_nemotron(messages),
+                "stream": False, "max_tokens": 4, "temperature": 0,
+                "stop": ["<turn|>", "<|endoftext|>"]})
+            response.raise_for_status()
+            actual = (response.json().get("usage") or {}).get("prompt_tokens")
+            if type(actual) is not int or actual != counter(messages):
+                raise StreamProtocolError("Local tokenizer/provider usage mismatch; revalidate configuration")
+        self.count_verified = True
+        self.diagnostics["token_count_verified"] = True
 
     async def check_model(self) -> None:
         response = await self.client.get("/api/v1/models")
@@ -144,6 +136,8 @@ class LMStudioFast:
         finished = False
         done = False
         try:
+            if not self.count_verified:
+                raise StreamProtocolError("Token counter is unverified; restart or revalidate before generation")
             compiled = self.compiler.compile(snapshot, message)
             prompt = render_nemotron(compiled.messages)
             self.diagnostics["context"] = {**compiled.metadata(),
@@ -205,6 +199,14 @@ class LMStudioFast:
                                 finished = True
                     if not done or not finished:
                         raise StreamProtocolError("Stream ended without a terminal frame and DONE")
+                    actual = metrics["prompt_tokens"]
+                    metrics["local_prompt_tokens"] = compiled.estimated_input_tokens
+                    metrics["token_count_difference"] = (actual - compiled.estimated_input_tokens
+                        if type(actual) is int else None)
+                    if type(actual) is not int or actual != compiled.estimated_input_tokens:
+                        self.count_verified = False
+                        self.diagnostics["token_count_verified"] = False
+                        raise StreamProtocolError("Local tokenizer/provider usage mismatch; revalidation required")
                     if pending:
                         if not visible:
                             metrics["ttft_ms"] = round((perf_counter() - start) * 1000, 2)

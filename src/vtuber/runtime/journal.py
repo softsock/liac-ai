@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Iterator
 
 from vtuber.contracts.events import CharacterId, Event, canonical_json, utc_now
-from vtuber.contracts.state import CharacterState, NoteProposal, UpdateResult
+from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextEpoch, ContextItem
+from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal, UpdateResult
 from vtuber.runtime.state import RevisionConflict, reduce_note
 
 
@@ -26,7 +27,7 @@ class Journal:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ValueError(f"Unsupported database version: {version}")
             with self._transaction():
                 self._db.execute("""CREATE TABLE IF NOT EXISTS events (
@@ -39,7 +40,10 @@ class Journal:
                 self._db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS user_turn ON events
                     (character_id, json_extract(content, '$.turn_id'))
                     WHERE json_extract(content, '$.kind') = 'user.message.completed'""")
-                self._db.execute("PRAGMA user_version=1")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS context_epochs (
+                    character_id TEXT NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
+                    PRIMARY KEY(character_id, version))""")
+                self._db.execute("PRAGMA user_version=2")
         except BaseException:
             self._db.close()
             raise
@@ -111,6 +115,118 @@ class Journal:
         row = self._db.execute("SELECT * FROM character_state WHERE character_id=?",
                                (character_id,)).fetchone()
         return CharacterState(character_id, row["revision"], row["context_note"]) if row else CharacterState(character_id)
+
+    def context_epoch(self, character_id: CharacterId) -> ContextEpoch:
+        row = self._db.execute("""SELECT content FROM context_epochs WHERE character_id=?
+            ORDER BY version DESC LIMIT 1""", (character_id,)).fetchone()
+        if row is None:
+            return ContextEpoch()
+        data = json.loads(row[0])
+        items = tuple(ContextItem(**{**item, "source_event_ids": tuple(item["source_event_ids"])})
+                      for item in data.pop("items"))
+        return ContextEpoch(**data, items=items)
+
+    def fast_snapshot(self, character_id: CharacterId) -> FastSnapshot:
+        self._db.execute("BEGIN")
+        try:
+            state = self.snapshot(character_id)
+            epoch = self.context_epoch(character_id)
+            high = self.high_watermark(character_id)
+            rows = self._db.execute("""SELECT * FROM events WHERE character_id=? AND sequence>?
+                AND sequence<=? AND json_extract(content, '$.kind') IN
+                ('user.message.completed', 'character.reply.completed') ORDER BY sequence""",
+                (character_id, epoch.compacted_through_sequence, high)).fetchall()
+            terminals = self._db.execute("""SELECT content, sequence FROM events WHERE character_id=?
+                AND sequence>? AND sequence<=? AND json_extract(content, '$.kind') IN
+                ('character.reply.completed', 'character.reply.cancelled', 'character.reply.failed')
+                ORDER BY sequence""", (character_id, epoch.compacted_through_sequence, high)).fetchall()
+            return FastSnapshot(state, high, tuple(self._decode(row) for row in rows), epoch,
+                tuple((json.loads(row["content"])["turn_id"], row["sequence"]) for row in terminals))
+        finally:
+            self._db.execute("COMMIT")
+
+    def apply_compaction(self, proposal: CompactionProposal) -> CompactionResult:
+        # Reject malformed identities before SQL binding or constructing audit IDs.
+        for value in (proposal.proposal_id, proposal.character_id):
+            if not isinstance(value, str) or not 1 <= len(value.strip()) <= 200:
+                raise ValueError("Invalid compaction identity")
+        encoded = canonical_json(asdict(proposal))
+        with self._transaction():
+            audit_id = f"compaction_{proposal.proposal_id}"
+            previous = self.get(audit_id)
+            if previous:
+                payload = previous.payload
+                if payload.get("proposal") != encoded:
+                    raise EventConflict(f"compaction proposal_id conflict: {proposal.proposal_id}")
+                return CompactionResult(payload["accepted"], payload["epoch_version"], payload["reason"])
+            epoch = self.context_epoch(proposal.character_id)
+            reason = self._validate_compaction(proposal, epoch)
+            if not reason:
+                epoch = ContextEpoch(epoch.version + 1, proposal.compacted_through_sequence, proposal.items)
+                self._db.execute("INSERT INTO context_epochs VALUES (?, ?, ?)",
+                    (proposal.character_id, epoch.version, canonical_json(asdict(epoch))))
+            result = CompactionResult(not reason, epoch.version, reason or "applied")
+            self._append(Event.create(proposal.character_id,
+                "context.epoch.rejected" if reason else "context.epoch.applied",
+                {"proposal": encoded, **asdict(result)}, event_id=audit_id))
+            return result
+
+    def _validate_compaction(self, proposal: CompactionProposal, epoch: ContextEpoch) -> str:
+        for value in (proposal.based_on_epoch, proposal.based_on_revision,
+                      proposal.observed_through_sequence, proposal.compacted_through_sequence):
+            if type(value) is not int or not 0 <= value <= 2**63 - 1:
+                return "invalid_watermark"
+        if proposal.based_on_epoch != epoch.version:
+            return "epoch_conflict"
+        if proposal.based_on_revision != self.snapshot(proposal.character_id).revision:
+            return "revision_conflict"
+        cutoff = proposal.compacted_through_sequence
+        if not epoch.compacted_through_sequence <= cutoff <= proposal.observed_through_sequence <= self.high_watermark(proposal.character_id):
+            return "invalid_watermark"
+        if not isinstance(proposal.items, tuple) or len(proposal.items) > 32:
+            return "invalid_items"
+        for item in proposal.items:
+            if (not isinstance(item, ContextItem) or item.kind not in ("extract", "summary")
+                    or type(item.truncated) is not bool or not isinstance(item.text, str)
+                    or not item.text.strip() or len(item.text) > 8000
+                    or not isinstance(item.source_event_ids, tuple) or not 1 <= len(item.source_event_ids) <= 32):
+                return "invalid_item"
+            sources = []
+            for event_id in item.source_event_ids:
+                if not isinstance(event_id, str) or not event_id.strip():
+                    return "invalid_source"
+                source = self.get(event_id)
+                if (source is None or source.character_id != proposal.character_id or source.sequence > cutoff
+                        or source.kind not in ("user.message.completed", "character.reply.completed")):
+                    return "invalid_source"
+                sources.append(source)
+            if item.kind == "extract":
+                if len(sources) != 1:
+                    return "invalid_extract"
+                text = sources[0].payload.get("text")
+                if not isinstance(text, str) or not (item.text == text or
+                        (item.truncated and text.startswith(item.text))):
+                    return "invalid_extract"
+        if cutoff == epoch.compacted_through_sequence:
+            return "" if proposal.items != epoch.items else "no_change"
+        # Every user turn covered by the cutoff must have ended before it.
+        rows = self._db.execute("""SELECT content FROM events WHERE character_id=? AND sequence>? AND sequence<=?
+            ORDER BY sequence""", (proposal.character_id, epoch.compacted_through_sequence, cutoff)).fetchall()
+        users, terminals = set(), set()
+        last_kind = ""
+        for row in rows:
+            data = json.loads(row[0])
+            last_kind = data["kind"]
+            if last_kind == "user.message.completed":
+                if not data["turn_id"]:
+                    return "invalid_cutoff"
+                users.add(data["turn_id"])
+            if last_kind in ("character.reply.completed", "character.reply.cancelled", "character.reply.failed"):
+                terminals.add(data["turn_id"])
+        if not users <= terminals or last_kind not in (
+                "character.reply.completed", "character.reply.cancelled", "character.reply.failed"):
+            return "invalid_cutoff"
+        return ""
 
     def cursor(self, character_id: CharacterId) -> int:
         row = self._db.execute("SELECT deep_cursor FROM character_state WHERE character_id=?",
