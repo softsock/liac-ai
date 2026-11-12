@@ -10,3 +10,5 @@ required content and stable role/prefix boundaries. Journal tests pin additive v
 migration, atomic epoch/audit rollback, replay and terminal-turn cutoffs. Transport
 checks cover split control tokens, incomplete SSE and cancellation/closure;
 they do not replace real Nemotron conversations and fault checks.
+
+M2 checks closed/interleaved turn boundaries, batch rollback/replay, stale retry, off-loop SDK waits and confirmed cancellation. Separate actual Luna/Nemotron acceptance from injected delay/transport checks.

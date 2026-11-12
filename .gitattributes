@@ -1,0 +1,2 @@
+# Preserve pinned upstream SDK bytes across Windows checkouts.
+vendor/omp-rpc/** -text

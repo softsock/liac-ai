@@ -11,6 +11,7 @@ dependencies = ["httpx>=0.28,<0.29"]
 
 [project.optional-dependencies]
 nemotron = ["tokenizers==0.22.2"]
+desktop = ["PySide6-Essentials>=6.10,<7"]
 
 [project.scripts]
 vtuber = "vtuber.cli:main"
@@ -19,4 +20,4 @@ vtuber = "vtuber.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"vtuber.minds" = ["character.md"]
+"vtuber.minds" = ["character.md", "deep.md"]

@@ -1,11 +1,17 @@
 from typing import AsyncGenerator, Protocol
 
-from vtuber.contracts.events import Event, RuntimeOutput, UserMessage
-from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal
+from vtuber.contracts.events import RuntimeOutput, UserMessage
+from vtuber.contracts.state import FastSnapshot
 from vtuber.contracts.context import CompactionProposal
+from vtuber.contracts.deep import DeepRequest, DeepResult
 
 
 class ContextPolicy(Protocol):
+    @property
+    def input_limit(self) -> int: ...
+
+    def input_tokens(self, snapshot: FastSnapshot, message: UserMessage) -> int: ...
+
     def prepare_epoch(self, snapshot: FastSnapshot, message: UserMessage) -> CompactionProposal | None: ...
 
     def validate_compaction(self, snapshot: FastSnapshot, proposal: CompactionProposal) -> None: ...
@@ -16,8 +22,7 @@ class FastMind(Protocol):
 
 
 class DeepMind(Protocol):
-    async def propose(self, state: CharacterState,
-                      events: tuple[Event, ...]) -> NoteProposal | None: ...
+    async def propose(self, request: DeepRequest) -> DeepResult: ...
 
 
 class OutputSink(Protocol):

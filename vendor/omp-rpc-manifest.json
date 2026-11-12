@@ -1,0 +1,23 @@
+{
+  "revision": "45c35e40c46166dc726ccc52f5d27f40f2449f99",
+  "files": {
+    "LICENSE": "048c9ebb09976a1c2e895d23f91dbe9114bd7858bfd7ff3b6a8f957feccbdfeb",
+    "README.md": "1c8b4d05e62bce8866ee56be134c683e29f77a4ddde5f3266f5ad87fca68fdcb",
+    "pyproject.toml": "6bb60c4ad5e94ce687197ad272ddafd3927b562d836fb607d6b925382c6284ed",
+    "src/omp_rpc/__init__.py": "eceeba6cb945877802c62c3fa398d91195215eee9f1179fc58b79596c6d6ce40",
+    "src/omp_rpc/_extension_ui.py": "0bb46a66e34ad691a916f1f8e54c5d7068cf0ddf7e6d389baad8f27717e66391",
+    "src/omp_rpc/_wire.py": "36f7b51bde473f3d09b5158ed8310c9146fa1538cd636c0fd9cffe03936350c8",
+    "src/omp_rpc/_wire_runtime.py": "730645c09ad52cf211e61630235166045a2d2c78404d704c1db144f9921df3a3",
+    "src/omp_rpc/client.py": "5470e520c016a769f12e3c007ccc08254a14f10c959634268746a170299c801d",
+    "src/omp_rpc/host_tools.py": "bd483f251c1d9a9265e623b8e58bfe165cba924b15d158da67d055cfae280e1c",
+    "src/omp_rpc/host_uris.py": "4201f0e28c74aa0cdcf7139f563c55b0a583cea29f5894c2e0fd50efae614af8",
+    "src/omp_rpc/protocol.py": "c4f14669f53a1db24153f579db7e29ed3409ef2b60fedde53c2b834cd10b2cf9",
+    "src/omp_rpc/py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "tests/__init__.py": "36f1ef41d54c7d83eb4f77ddf86bbfe4a6d92cad116f87c7860e53f4dceab43e",
+    "tests/test_client.py": "be3dc72c79b1b0b099199cf6494361e744168a42ce598bc087198a70c6e7eebd",
+    "tests/test_host_uris.py": "7504b14269699139302a9de4fcb68eab28ec53fb97e02f05dcb644dec9a6d0b1",
+    "tests/test_protocol.py": "6db0127079c9927aa1db829e2cf01c257e71619a7ff888d6458b15c4c9040520",
+    "tests/test_user_group.py": "9eb9beb993d3d68c9d4e2af37fe906a3b598644a71486119ad63201975631661",
+    "uv.lock": "17c6bd11a44219d42ff0fa875f6f2f1f1395875a7f175baca43d107ea498b8aa"
+  }
+}

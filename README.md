@@ -1,8 +1,8 @@
 # liac-ai
 
-An autonomous AI VTuber backend. **M1.5** adds durable context epochs and local
-token budgeting for NVIDIA Nemotron through LM Studio. Deep remains a deterministic fake: it observes the
-durable journal asynchronously and proposes notes for subsequent turns.
+An autonomous AI VTuber backend. M2 connects optional GPT-6 Luna through OMP as
+an asynchronous Deep Mind alongside local Nemotron. Durable context epochs,
+exact local token budgeting and deterministic offline fallback remain from M1.5.
 
 ## Run
 
@@ -126,4 +126,68 @@ The opt-in live script runs three serial trials, genuine CLI sessions and restar
 Deep/cancel checks; private raw logs and databases stay under ignored `.data/`.
 [PROJECT_BLUEPRINT](docs/PROJECT_BLUEPRINT.md) describes
 the wider project. One runtime owns a database at a time. Adapters must cooperate
-with cancellation. GPT-6 Luna/OMP is M2; it is not connected in this milestone.
+with cancellation. Optional GPT-6 Luna/OMP is available in M2 below.
+
+## Luna Deep Mind (M2)
+
+Install the optional pinned official Python SDK with `python -m pip install -r requirements-luna.txt`. Use an independently installed OMP 18.12.6 and existing authenticated `openai-codex` provider. No credentials are copied by this repository.
+
+```powershell
+python -m vtuber --fast-backend lmstudio --endpoint http://127.0.0.1:1230 --model liac-nemotron --deep-backend luna --luna-model openai-codex/gpt-6-luna --deep-timeout 60
+```
+
+`--omp-executable PATH` selects OMP; `--luna-data PATH` owns its workspace/session files (default `.data/luna`). The default Deep backend remains fake. `/status` and `/metrics` show bounded Deep lifecycle/usage/decision diagnostics; `/retry` starts a new retry cycle. Tools, extensions, skills, rules, LSP and project MCP discovery are disabled. This is application confinement, not an OS sandbox. Keep private runtime/session data out of Git and use one Runtime owner per database.
+
+Deep observes whole completed turns and proposes one working note plus optional semantic epoch. Preparation starts at 75% of the input budget; the 90% deterministic fallback continues when Luna is late/offline. Current Fast streams keep their frozen snapshot. Failed/stale batches retain the durable cursor and retry at 1/2/4/8/16 seconds, then remain degraded until new input or `/retry`. New processes rebuild Luna's disposable context from canonical evidence; the Journal remains authoritative. Summary sources prove provenance, not correctness. Notes can suggest a performance idea; a beat scheduler and permanent Memory Store remain future work.
+
+Provider `usage_limit_reached` latches Deep without repeated child launches; restart Runtime after provider availability returns. See [M2 results and limits](docs/M2_IMPLEMENTATION.md), including the interrupted quota sample and a failed short CLI recall.
+
+## Desktop chat and inspector
+
+Install the optional Widgets dependency in your virtual environment:
+
+```powershell
+python -m pip install -e '.[desktop,nemotron]'
+python -m pip install -r requirements-luna.txt
+python -m vtuber.desktop --root .
+```
+
+On Windows, double-click **`Start-Inspector.cmd` in this worktree**. It resolves
+the project directory and uses this checkout's `.venv`, or the main checkout's
+`.venv` when running inside a linked worktree. An alternate interpreter can be
+selected with `./scripts/start-inspector.ps1 -Python C:/path/to/python.exe`.
+Startup logs stay in `.data/desktop/`. This avoids relying on the terminal's cwd.
+
+Alternatively, launch **`LIAC-Inspector.exe`** from the repository root when built.
+It includes Python and Qt and stores `.data` beside the executable. LM Studio,
+OMP and the tokenizer JSON remain external. See the
+[Windows build instructions](docs/DESKTOP_INSPECTOR.md#windows-executable).
+
+Choose backend and paths in **Settings**, then **Start**. Real mode needs
+the tokenizer setup above, loaded LM Studio model and existing OMP authentication.
+`fake / fake` works offline. Chat streams in the center; **Ctrl+Enter** sends,
+**Cancel Fast** cancels speech, and **Retry Deep** wakes the observer.
+Stop Runtime before opening another trace or changing connection settings.
+Do not run another CLI/desktop owner against the same SQLite database.
+
+The left timeline records Fast turns and Luna attempts with their IDs and phases.
+Select any phase to inspect that request's input, output, context, metrics and
+before/after note/epoch changes. Search matches IDs or event kinds; process filter
+selects Fast, Luna or Runtime. **JSON** shows the original selected record;
+**Open JSON** opens its complete local file. Text previews are capped at
+200,000 characters. Chat displays the latest 5,000 blocks; startup restores up to
+1,000 canonical dialogue messages; Journal tab shows the latest 500 events. Full
+canonical history remains in SQLite, and request traces remain on disk.
+
+**Context** distinguishes the exact rendered Fast prompt from Luna's configured
+system prompt, submitted JSON and text-visible OMP session history. OMP's internal
+provider HTTP body is unavailable and is not reconstructed. Reasoning blocks,
+opaque signatures and provider payloads are omitted. Raw model JSON, validation
+errors and rejected Runtime decisions remain inspectable.
+
+Developer mode records private full contexts under ignored `.data/traces/run-*`.
+**Open trace…** opens a saved run without launching models; old Journal data
+does not magically recover missing prompts. Capture is bounded to 128 MiB per run;
+disk failure/limit stops capture visibly without deleting data or stopping chat.
+Trace persistence happens at request boundaries, not on every token. See
+[desktop implementation and verification](docs/DESKTOP_INSPECTOR.md).

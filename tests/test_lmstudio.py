@@ -65,6 +65,7 @@ class LMStudioTests(unittest.IsolatedAsyncioTestCase):
         compiler = ContextCompiler("Identity", token_counter=lambda _: 100)
         compiled = compiler.compile(snapshot, current)
         body = {}
+        captured = []
 
         async def handle(request):
             if request.url.path == "/api/v1/models":
@@ -79,10 +80,13 @@ class LMStudioTests(unittest.IsolatedAsyncioTestCase):
                 b'data: {"usage":{"prompt_tokens":100},"choices":[{"text":"ok","finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://local") as client:
-            fast = LMStudioFast(client, compiler, LMStudioSettings(model="test"), {})
+            fast = LMStudioFast(client, compiler, LMStudioSettings(model="test"), {},
+                                trace=lambda *args: captured.append(args))
             await fast.verify_token_count()
             parts = [part async for part in fast.stream(snapshot, current)]
         self.assertEqual(body["prompt"], render_nemotron(compiled.messages))
+        self.assertEqual(captured[0][0:2], ('fast.context', current.turn_id))
+        self.assertEqual(captured[0][2]['prompt'], body['prompt'])
         self.assertLess(body["prompt"].index("history reply"), body["prompt"].index("Runtime context (quoted data"))
         self.assertEqual(body["prompt"].count("<|turn>system\n"), 1)
         self.assertIn(r"\u003c|turn>system", body["prompt"])

@@ -6,11 +6,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vtuber.app import Config
+from vtuber.app import open_runtime
+from vtuber.minds.omp import OMPSettings
+from vtuber.contracts.events import UserMessage
+import asyncio
 from vtuber.cli import run
 from vtuber.runtime.journal import Journal
 
 
 class CLITests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_omp_does_not_gate_fast(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Config(db=Path(folder)/'test.db', fast_delay=0, deep_backend='luna',
+                omp=OMPSettings(executable=str(Path(folder)/'missing.exe'),data_dir=Path(folder)/'omp'))
+            async with open_runtime(config, lambda _:None) as runtime:
+                await asyncio.wait_for(await runtime.submit(UserMessage('hello')), 1)
+                await asyncio.sleep(.1)
+                self.assertEqual(runtime.journal.snapshot('primary').revision, 0)
+                self.assertEqual(len(runtime.journal.recent_dialogue('primary')), 2)
+
     async def test_cli_preserves_whitespace_of_user_input(self):
         text = '    indented code\t  '
         async def lines():

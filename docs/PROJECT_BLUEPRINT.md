@@ -42,6 +42,11 @@ A **persistent, autonomous, character-first AI VTuber backend**. This is not a r
 
 The frontend is deliberately absent for now. A text-only terminal/test harness must make the character observable and testable. Later the existing Loonyball body and bubble can be connected as a client through a stable, transport-neutral output interface. The new repo must **never import Loonyball** or require Qt.
 
+**2026-11-13 DECIDED:** an optional standalone PySide6 developer inspector now
+provides local chat and Fast/Luna request inspection. Qt is optional and confined
+to `desktop/`; the backend/CLI remain headless. This is a diagnostic client, not
+the future character body or Loonyball integration.
+
 ### 1.2 What a successful character does
 
 - Responds quickly, normally through one local conversational model, with a distinctive personal voice.
@@ -443,7 +448,7 @@ newer exact events; stale bases reject without rebasing. Raw events and Deep cur
 are unchanged. Deterministic fallback keeps an oldest-user anchor, recent extracts
 (2048-token block, 256-token/item cap) and up to three whole recent turns within
 2048 tokens. Extracts are incomplete projections, not a guarantee of remembering
-all important facts. Semantic Luna selection remains M2/FUTURE.
+all important facts. M2 adds optional semantic Luna selection; see `docs/M2_IMPLEMENTATION.md` for observed results and limits.
 
 A forgotten item can be restored from Luna's still-relevant context or from Memory/Journal asynchronously. It may arrive too late for the current Fast reply; system must not falsely guarantee zero-delay remembrance. Add cached memory retrieval to Fast only if it is demonstrably low-latency; otherwise keep it off critical path.
 
@@ -723,6 +728,12 @@ Teasing is fictional entertainment; support direct boundaries (`stop teasing me 
 For every handled turn produce inspectable trace metadata: input `event_id`, `turn_id`, `state_revision`, `context_snapshot_hash`, token budget by section, Fast model/config, first-token latency, completed/canceled output status, Deep consumer lag, proposal ids, validation outcomes, memory source ids, beat id if applicable. Redact private content in default logs; diagnostic developer mode can show local prompt snapshots with explicit opt-in.
 
 ### 18.2 Developer inspector [CLI first]
+
+**2026-11-13 DECIDED:** desktop developer mode records bounded private request
+snapshots separately from domain events. Fast wire prompts are exact; Luna's
+configured role, submitted JSON and visible OMP session messages are labelled as
+adapter observations, not an unobserved provider HTTP body. The UI cannot recover
+historical prompts that were never captured. See [desktop inspector](DESKTOP_INSPECTOR.md).
 
 Required commands/capabilities over time: `status`, `events --since`, `context --turn`, `deep queue`, `proposals`, `memory list`, `memory explain`, `beats list`, `replay <range>`, `health`. Implement only what's needed for current milestone, but preserve data necessary for later investigation.
 
@@ -1005,3 +1016,11 @@ The newest upstream API and implementation take precedence over exact method nam
 ## Final project statement
 
 We are building an **autonomous, entertaining and coherent virtual character**, not a maximally capable assistant. One fast local model gives the character its immediate voice. A stronger asynchronous model receives the same durable stream of experience, maintains a richer working context, curates memory and proposes meaningful acts, jokes and longer-term motivations. A deliberately small deterministic backend owns event order, state, prompt composition, safety and persistence. The result must be inspectable, testable, recoverable, and easy for a coding agent to reason about without loading the entire project into context. Backend first; Loonyball only after that backend demonstrates a convincing first character.
+
+## M2 implementation decisions — 2026-11-12
+
+**DECIDED:** one serialized asynchronous observer uses the pinned official OMP Python SDK. Schema-v1 Deep results contain optional replacement context note and semantic epoch; model output supplies data/evidence only. Runtime assigns IDs/base dependencies and atomically commits decisions plus the existing cursor. Batches end only at closed turn boundaries; stale results retain the input for bounded reconsideration. New dialogue alone does not invalidate an older eligible cutoff. Notes also depend on the captured epoch; startup closes every unterminated accepted input, including one persisted before reply.started.
+
+**DECIDED:** preparation signals at 75% of the Fast input allowance; M1.5 fallback stays above 90%. Character Identity is shared; `deep.md` only supplies the hidden Deep role. Notes may suggest concrete performance ideas. The richer note operation/beat examples in section 9 are FUTURE; M2 has one replacement note and no beat scheduler, expiry/one-shot engine or Memory Store.
+
+**PROVISIONAL:** OMP 18.12.6 plus `openai-codex/gpt-6-luna` verified locally. Tools/discovery are disabled in an owned workspace; this is not OS isolation. OMP sessions are disposable and rebuilt from canonical request evidence after failure/restart. Usage-limit errors latch Deep until Runtime restart after provider availability returns; Fast remains independent. See [M2 implementation evidence](M2_IMPLEMENTATION.md) for timings, recall, recovery and explicit failed samples.

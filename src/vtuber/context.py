@@ -121,6 +121,9 @@ class ContextCompiler:
             self.safety_margin_tokens, (("required", required_count), ("epoch", with_items - required_count),
                                        ("history", total - with_items)), (perf_counter() - start) * 1000)
 
+    def input_tokens(self, snapshot: FastSnapshot, message: UserMessage) -> int:
+        return self.count(self._messages(snapshot, message, self._history(snapshot, message), snapshot.epoch.items))
+
     def _item_budget(self, snapshot: FastSnapshot, message: UserMessage,
                      items: tuple[ContextItem, ...]) -> int:
         return self.count(self._messages(snapshot, message, (), items)) - self.count(self._messages(snapshot, message, (), ()))
