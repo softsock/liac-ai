@@ -42,6 +42,11 @@ A **persistent, autonomous, character-first AI VTuber backend**. This is not a r
 
 The frontend is deliberately absent for now. A text-only terminal/test harness must make the character observable and testable. Later the existing Loonyball body and bubble can be connected as a client through a stable, transport-neutral output interface. The new repo must **never import Loonyball** or require Qt.
 
+**2026-11-13 DECIDED:** an optional standalone PySide6 developer inspector now
+provides local chat and Fast/Luna request inspection. Qt is optional and confined
+to `desktop/`; the backend/CLI remain headless. This is a diagnostic client, not
+the future character body or Loonyball integration.
+
 ### 1.2 What a successful character does
 
 - Responds quickly, normally through one local conversational model, with a distinctive personal voice.
@@ -723,6 +728,12 @@ Teasing is fictional entertainment; support direct boundaries (`stop teasing me 
 For every handled turn produce inspectable trace metadata: input `event_id`, `turn_id`, `state_revision`, `context_snapshot_hash`, token budget by section, Fast model/config, first-token latency, completed/canceled output status, Deep consumer lag, proposal ids, validation outcomes, memory source ids, beat id if applicable. Redact private content in default logs; diagnostic developer mode can show local prompt snapshots with explicit opt-in.
 
 ### 18.2 Developer inspector [CLI first]
+
+**2026-11-13 DECIDED:** desktop developer mode records bounded private request
+snapshots separately from domain events. Fast wire prompts are exact; Luna's
+configured role, submitted JSON and visible OMP session messages are labelled as
+adapter observations, not an unobserved provider HTTP body. The UI cannot recover
+historical prompts that were never captured. See [desktop inspector](DESKTOP_INSPECTOR.md).
 
 Required commands/capabilities over time: `status`, `events --since`, `context --turn`, `deep queue`, `proposals`, `memory list`, `memory explain`, `beats list`, `replay <range>`, `health`. Implement only what's needed for current milestone, but preserve data necessary for later investigation.
 

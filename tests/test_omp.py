@@ -21,6 +21,9 @@ class Client:
         self.message = {'stopReason': 'stop', 'usage': {}}
     def start(self): return self
     def get_state(self): return SimpleNamespace(session_id='session', model=SimpleNamespace(id='gpt-6-luna', provider='openai-codex'))
+    def get_messages(self): return ({'role':'user', 'content':[{'type':'text','text':'prior evidence'}]},)
+    def _command(self, command, params, *, timeout):
+        return {'messages': self.get_messages()}
     def prompt_and_wait(self, prompt, timeout):
         self.entered.set()
         self.release.wait(2)
@@ -61,6 +64,72 @@ class OMPTests(unittest.IsolatedAsyncioTestCase):
         self.clients[-1].release.set()
         self.assertEqual(await task, '{}')
         self.assertEqual(self.clients[-1].kwargs['tools'], ())
+
+    async def test_trace_captures_session_view_with_request_id(self):
+        records = []
+        self.transport.trace = lambda *args: records.append(args)
+        task = asyncio.create_task(self.transport.request('{"current":"green"}', request_id='batch-7'))
+        await self.entered()
+        self.clients[-1].release.set()
+        await task
+        context = next(data for kind, key, data in records if kind == 'omp.context' and key == 'batch-7')
+        self.assertEqual(context['system_prompt'], 'identity')
+        self.assertEqual(context['session_messages'][0]['role'], 'user')
+        self.assertEqual(context['current_prompt'], '{"current":"green"}')
+        self.assertIn('not the provider', context['scope'])
+
+    async def test_trace_omits_reasoning_and_provider_payloads(self):
+        records = []
+        self.transport.trace = lambda *args: records.append(args)
+        def messages(client):
+            return ({'role':'assistant', 'content':[{'type':'thinking','thinking':'private-thought'},
+                {'type':'text','text':'visible answer','textSignature':'opaque-secret'}],
+                'providerPayload':{'secret':'opaque'}},)
+        with patch.object(Client, 'get_messages', messages):
+            task = asyncio.create_task(self.transport.request('{}', request_id='trace'))
+            await self.entered()
+            self.clients[-1].release.set()
+            await task
+        import json
+        captured = json.dumps(records)
+        self.assertNotIn('private-thought', captured)
+        self.assertNotIn('opaque-secret', captured)
+        self.assertNotIn('providerPayload', captured)
+        self.assertIn('visible answer', captured)
+
+    async def test_slow_optional_history_does_not_exhaust_inference(self):
+        import time
+        class SlowHistory(Client):
+            def get_messages(self):
+                time.sleep(.5)
+                return ()
+            def _command(self, command, params, *, timeout):
+                self.history_timeout = timeout
+                time.sleep(min(.5, timeout))
+                raise TimeoutError('history did not answer')
+        client = SlowHistory()
+        client.release.set()
+        captured = []
+        self.transport.trace = lambda *args: captured.append(args)
+        with patch('vtuber.minds.omp.sdk_client', return_value=client):
+            async with asyncio.timeout(.3):
+                self.assertEqual(await self.transport.request('{}', request_id='bounded'), '{}')
+        self.assertLessEqual(client.history_timeout, .1)
+        context = next(data for kind, _, data in captured if kind == 'omp.context')
+        self.assertEqual(context['history_error'], 'TimeoutError')
+
+    async def test_stopped_capture_does_not_query_history(self):
+        from vtuber.tracing import TraceRecorder
+        trace = TraceRecorder(Path(self.folder.name) / 'traces', max_bytes=1)
+        trace('test', 'test', {})
+        self.transport.trace = trace
+        calls = []
+        client = Client()
+        client.release.set()
+        with patch('vtuber.minds.omp.sdk_client', return_value=client), \
+                patch.object(Client, 'get_messages', lambda self: calls.append('history') or ()):
+            await self.transport.request('{}')
+        self.assertEqual(calls, [])
 
     async def test_cancel_joins_old_operation_before_restart(self):
         task = asyncio.create_task(self.transport.request('{}'))

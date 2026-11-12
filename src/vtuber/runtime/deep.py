@@ -1,5 +1,6 @@
 """One serialized, recoverable observer. No provider operation belongs to Fast."""
 import asyncio
+from dataclasses import asdict
 from time import perf_counter
 
 from vtuber.contracts.context import ContextBudgetExceeded
@@ -7,6 +8,7 @@ from vtuber.contracts.deep import DeepUnavailable
 from vtuber.contracts.events import RuntimeOutput, UserMessage, new_id
 from vtuber.contracts.protocols import ContextPolicy, DeepMind, OutputSink
 from vtuber.runtime.journal import Journal
+from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
 
 async def retry_delay(seconds: float) -> None:
@@ -15,10 +17,12 @@ async def retry_delay(seconds: float) -> None:
 
 class DeepWorker:
     def __init__(self, character_id: str, journal: Journal, mind: DeepMind, output: OutputSink,
-                 *, timeout: float, context_policy: ContextPolicy | None, diagnostics: dict[str, object]) -> None:
+                 *, timeout: float, context_policy: ContextPolicy | None, diagnostics: dict[str, object],
+                 trace: TraceSink | None = None) -> None:
         self.character_id, self.journal, self.mind, self.output = character_id, journal, mind, output
         self.timeout, self.context_policy, self.diagnostics = timeout, context_policy, diagnostics
         self.error: str | None = None
+        self.trace = trace
         self._wake = asyncio.Event()
         self._retry = asyncio.Event()
         self._task = None
@@ -70,6 +74,7 @@ class DeepWorker:
             self._retry.clear()
             failures = 0
             while not self._stopping:
+                request = None
                 revision = self.journal.snapshot(self.character_id).revision
                 try:
                     pressure = self._compact or self._pressure()
@@ -85,6 +90,8 @@ class DeepWorker:
                         cursor_from=request.cursor_from, preparing_epoch=request.compaction is not None,
                         base_epoch=request.snapshot.epoch.version)
                     start = perf_counter()
+                    if trace_enabled(self.trace):
+                        emit_trace(self.trace, 'deep.started', request.request_id, request=asdict(request))
                     async with asyncio.timeout(self.timeout):
                         result = await self.mind.propose(request)
                     if self._stopping:
@@ -97,9 +104,14 @@ class DeepWorker:
                         except ContextBudgetExceeded:
                             budget_error = 'context_budget_exceeded'
                     start = perf_counter()
+                    before = self.journal.fast_snapshot(self.character_id) if trace_enabled(self.trace) else None
                     decision = self.journal.apply_deep(request, result, compaction_error=budget_error)
                     self.diagnostics.update(commit_ms=round((perf_counter()-start)*1000, 3),
                         decision=decision.reason, acknowledged=decision.acknowledged)
+                    if trace_enabled(self.trace):
+                        emit_trace(self.trace, 'deep.decision', request.request_id,
+                                   result=asdict(result), decision=asdict(decision), before=asdict(before),
+                                   after=asdict(self.journal.fast_snapshot(self.character_id)), metrics=self.diagnostics)
                     if not decision.acknowledged:
                         raise ValueError(decision.reason)
                     current = self.journal.snapshot(self.character_id)
@@ -112,11 +124,16 @@ class DeepWorker:
                     self.output(RuntimeOutput('deep.completed', self.character_id, revision,
                         text=f'{decision.reason}; through #{request.snapshot.through_sequence}'))
                 except asyncio.CancelledError:
+                    if request is not None:
+                        emit_trace(self.trace, 'deep.cancelled', request.request_id, reason='shutdown')
                     raise
                 except Exception as error:
                     if self._stopping:
                         return
                     self.error = type(error).__name__
+                    if request is not None:
+                        emit_trace(self.trace, 'deep.failed', request.request_id, error=self.error,
+                                   reason=str(error) if isinstance(error, ValueError) else self.error)
                     terminal = isinstance(error, DeepUnavailable)
                     self.diagnostics.update(error=self.error, retry_count=failures, degraded=terminal or failures >= 5)
                     self.output(RuntimeOutput('deep.failed', self.character_id, revision, text=self.error))

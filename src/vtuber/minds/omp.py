@@ -8,11 +8,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from vtuber.contracts.deep import DeepUnavailable
+from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
 
 def sdk_client(**kwargs):
     from omp_rpc import RpcClient
     return RpcClient(**kwargs)
+
+
+def visible_session(messages):
+    """Capture text context, excluding reasoning, signatures and provider internals."""
+    result = []
+    for message in messages:
+        content = message.get('content', message.get('summary', ''))
+        if isinstance(content, list):
+            content = [({'type': 'text', 'text': block.get('text', '')} if block.get('type') == 'text'
+                        else {'type': block.get('type', 'unknown'), 'omitted': True})
+                       for block in content if isinstance(block, dict)]
+        result.append({'role': message.get('role', 'unknown'), 'content': content})
+    return result
 
 
 @dataclass(frozen=True)
@@ -31,10 +45,12 @@ class OMPSettings:
 
 
 class OMPTransport:
-    def __init__(self, settings: OMPSettings, system_prompt: str, diagnostics: dict[str, object]) -> None:
+    def __init__(self, settings: OMPSettings, system_prompt: str, diagnostics: dict[str, object],
+                 *, trace: TraceSink | None = None) -> None:
         self.settings = settings
         self.system_prompt = system_prompt
         self.diagnostics = diagnostics
+        self.trace = trace
         self._lock = asyncio.Lock()
         self._client = None
         self._pending = None
@@ -109,7 +125,7 @@ class OMPTransport:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def request(self, prompt: str) -> str:
+    async def request(self, prompt: str, *, request_id: str = '') -> str:
         if len(prompt.encode('utf-8')) > 524288:
             raise ValueError('OMP request exceeds 512 KiB; evidence was not truncated')
         async with self._lock:
@@ -142,6 +158,21 @@ class OMPTransport:
                         raise ValueError('OMP selected a different model')
                     self.diagnostics.update(session_id=state.session_id, model=actual)
                 self.diagnostics['lifecycle'] = 'analyzing'
+                if trace_enabled(self.trace):
+                    history = None
+                    history_error = None
+                    try:
+                        # The pinned SDK getter paginates without a total deadline.
+                        # Its command boundary supports one bounded local RPC instead.
+                        payload = await self._call(self._client._command, 'get_messages', {}, timeout=.1)
+                        history = visible_session(payload['messages'])
+                    except Exception as error:
+                        history_error = type(error).__name__
+                    emit_trace(self.trace, 'omp.context', request_id,
+                               system_prompt=self.system_prompt, session_messages=history,
+                               history_error=history_error, current_prompt=prompt,
+                               session_id=self.diagnostics.get('session_id'), model=self.settings.model,
+                               scope='OMP session view, not the provider HTTP request')
                 turn = await self._call(self._client.prompt_and_wait, prompt, timeout=self.settings.request_timeout)
                 if turn.assistant_message and 'usage_limit_reached' in str(turn.assistant_message.get('errorMessage', '')):
                     self._provider_blocked = True
@@ -154,6 +185,8 @@ class OMPTransport:
                 if len(text.encode('utf-8')) > 65536:
                     raise ValueError('OMP assistant response exceeds 64 KiB')
                 self.diagnostics.update(lifecycle='ready', usage=turn.assistant_message.get('usage', {}), error=None)
+                emit_trace(self.trace, 'omp.completed', request_id, usage=turn.assistant_message.get('usage', {}),
+                           session_id=self.diagnostics.get('session_id'))
                 return text
             except BaseException as error:
                 self.diagnostics['error'] = type(error).__name__

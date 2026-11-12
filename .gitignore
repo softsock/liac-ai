@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 .data/
+.superpowers/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm

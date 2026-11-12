@@ -15,6 +15,7 @@ Use Python 3.12+ and a virtual environment. HTTPX is the only core direct runtim
 - `python -m vtuber --fast-backend lmstudio --endpoint URL --model ID --tokenizer PATH` — stream from loaded Nemotron; see README for the pinned tokenizer.
 - `python -m unittest discover -s tests -v` — run critical invariant checks.
 - `git diff --check` and `git status --short` — inspect whitespace and changed/untracked files.
+- `python -m pip install -e '.[desktop,nemotron]'` and `python -m vtuber.desktop` — optional PySide6 inspector; Windows launcher `Start-Inspector.cmd` resolves the worktree root.
 
 ## Coding Style & Naming Conventions
 
@@ -39,5 +40,8 @@ Credit softsock in PR descriptions too. Describe behavioral effects, affected in
 ## Agent & Configuration Rules
 
 Never use GPT-6 Astra for subagents. Keep changes within the requested milestone; future blueprint items are not current requirements. Keep secrets and private runtime data out of Git and diagnostics. Do not modify Loonyball, deploy, or install large services without an explicit request.
+Use English only for application interface text and code comments.
 
 M2 adds optional Luna via the pinned SDK-only vendor under `vendor/omp-rpc`. Install with `python -m pip install -r requirements-luna.txt`; fake mode requires neither SDK nor credentials. Deep returns versioned results; Runtime alone commits decisions and acknowledgement.
+
+`desktop/` owns Qt Widgets and the asyncio worker bridge. Qt never enters core modules. Full developer snapshots go to bounded ignored `.data/traces/`, separate from domain events; capture failure cannot block model work. OMP session observations are not provider wire requests. Read `desktop/AGENTS.md` before changing UI/thread lifecycle.

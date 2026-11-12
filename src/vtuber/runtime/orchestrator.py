@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import aclosing, suppress
 from time import perf_counter
+from dataclasses import asdict
 from typing import Literal
 
 from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage
@@ -12,6 +13,7 @@ from vtuber.contracts.context import CompactionProposal, CompactionResult, Conte
 from vtuber.contracts.state import FastSnapshot
 from vtuber.runtime.deep import DeepWorker
 from vtuber.runtime.journal import Journal
+from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
 logger = logging.getLogger(__name__)
 TERMINAL_OUTPUTS: dict[str, OutputKind] = {
@@ -24,19 +26,20 @@ class Runtime:
                  output: OutputSink, *, deep_timeout: float = 30.0,
                  fast_diagnostics: dict[str, object] | None = None,
                  deep_diagnostics: dict[str, object] | None = None,
-                 context_policy: ContextPolicy | None = None) -> None:
+                 context_policy: ContextPolicy | None = None, trace: TraceSink | None = None) -> None:
         self.character_id = character_id
         self.journal = journal
         self.fast = fast
         self.deep = deep
         self.output = output
+        self.trace = trace
         self.deep_timeout = deep_timeout
         self.context_policy = context_policy
         self.fast_diagnostics = fast_diagnostics if fast_diagnostics is not None else {}
         self.last_cancellation_ms: float | None = None
         self.deep_diagnostics = deep_diagnostics if deep_diagnostics is not None else {}
         self._deep_worker = DeepWorker(character_id, journal, deep, self._emit,
-            timeout=deep_timeout, context_policy=context_policy, diagnostics=self.deep_diagnostics)
+            timeout=deep_timeout, context_policy=context_policy, diagnostics=self.deep_diagnostics, trace=trace)
         self._input_lock = asyncio.Lock()
         self._fast_task: asyncio.Task[None] | None = None
         self._current: tuple[UserMessage, FastSnapshot] | None = None
@@ -87,7 +90,12 @@ class Runtime:
                 if self.context_policy is not None:
                     proposal = self.context_policy.prepare_epoch(snapshot, message)
                     if proposal is not None:
+                        before = asdict(snapshot.epoch) if trace_enabled(self.trace) else None
                         result = self.apply_compaction(proposal)
+                        if trace_enabled(self.trace):
+                            emit_trace(self.trace, 'runtime.epoch', message.turn_id,
+                                       before=before, proposal=asdict(proposal), result=asdict(result),
+                                       after=asdict(self.journal.context_epoch(self.character_id)))
                         if not result.accepted:
                             raise ValueError(f"Local compaction rejected: {result.reason}")
                         snapshot = self.journal.fast_snapshot(self.character_id)
@@ -103,6 +111,9 @@ class Runtime:
                 event_id=f"reply_started_{message.event_id}", turn_id=message.turn_id,
                 causation_id=message.event_id))
             self._current = message, snapshot
+            if trace_enabled(self.trace):
+                emit_trace(self.trace, 'fast.started', message.turn_id,
+                           message=asdict(message), snapshot=asdict(snapshot))
             if error is not None:
                 self.fast_diagnostics.pop("context", None)
                 self.fast_diagnostics["generation"] = {"turn_id": message.turn_id, "status": "failed",
@@ -140,7 +151,7 @@ class Runtime:
 
     def _finish(self, message: UserMessage, snapshot: FastSnapshot,
                 status: Literal["completed", "cancelled", "failed"],
-                text: str = "", reason: str = "") -> None:
+                text: str = "", reason: str = "", partial: str = "") -> None:
         event_id = f"reply_terminal_{message.event_id}"
         if self.journal.get(event_id) is not None:
             return
@@ -152,6 +163,8 @@ class Runtime:
         self.journal.append(Event.create(self.character_id, f"character.reply.{status}", payload,
             event_id=event_id, turn_id=message.turn_id, causation_id=message.event_id))
         self._deep_worker.notify()
+        emit_trace(self.trace, 'fast.finished', message.turn_id, status=status, text=text,
+                   partial=partial, reason=reason, metrics=self.fast_diagnostics)
         self._emit(RuntimeOutput(TERMINAL_OUTPUTS[status], self.character_id, snapshot.state.revision,
                                  message.turn_id, text if status == "completed" else reason))
 
@@ -171,18 +184,24 @@ class Runtime:
             if self._stopping or asyncio.current_task() is not self._fast_task:
                 raise asyncio.CancelledError
             self._finish(message, snapshot, "completed", "".join(chunks))
-        except asyncio.CancelledError:
-            self._finish(message, snapshot, "cancelled", reason="shutdown" if self._stopping else "superseded")
+        except asyncio.CancelledError as cancelled:
+            reason = str(cancelled) or ('shutdown' if self._stopping else 'superseded')
+            self._finish(message, snapshot, "cancelled", reason=reason, partial=''.join(chunks))
             raise
         except Exception as error:
-            self._finish(message, snapshot, "failed", reason=type(error).__name__)
+            self._finish(message, snapshot, "failed", reason=type(error).__name__, partial=''.join(chunks))
+
+    async def cancel_fast(self) -> None:
+        """Cancel visible speech without stopping the independent Deep observer."""
+        async with self._input_lock:
+            await self._cancel_fast('user_cancelled')
 
     async def _cancel_fast(self, reason: str) -> None:
         if self._fast_task is not None:
             task, self._fast_task = self._fast_task, None
             was_active = not task.done()
             start = perf_counter()
-            task.cancel()
+            task.cancel(reason)
             with suppress(asyncio.CancelledError):
                 await task
             # A task cancelled before its first instruction cannot run its own cleanup.

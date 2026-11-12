@@ -15,6 +15,7 @@ from vtuber.context import ChatMessage, ContextCompiler
 from vtuber.minds.nemotron import CONTROL_MARKERS, render_nemotron
 from vtuber.contracts.events import UserMessage
 from vtuber.contracts.state import FastSnapshot
+from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
 
 class StreamProtocolError(RuntimeError):
@@ -78,10 +79,11 @@ def speech_prefix(buffer: str) -> tuple[str, str]:
 
 class LMStudioFast:
     def __init__(self, client: httpx.AsyncClient, compiler: ContextCompiler,
-                 settings: LMStudioSettings, diagnostics: dict[str, object]) -> None:
+                 settings: LMStudioSettings, diagnostics: dict[str, object], *, trace: TraceSink | None = None) -> None:
         self.client, self.compiler, self.settings = client, compiler, settings
         self.diagnostics = diagnostics
         self.count_verified = False
+        self.trace = trace
         diagnostics.update({"backend": "lmstudio", "configuration": asdict(settings),
             "context_tokens": compiler.context_tokens, "enable_thinking": False,
             "conversational_mode": True, "template": "NVIDIA Gemma4 text-only (2026-08-20)",
@@ -142,6 +144,10 @@ class LMStudioFast:
             prompt = render_nemotron(compiled.messages)
             self.diagnostics["context"] = {**compiled.metadata(),
                 "rendered_prompt_sha256": sha256(prompt.encode()).hexdigest()}
+            if trace_enabled(self.trace):
+                emit_trace(self.trace, 'fast.context', message.turn_id,
+                           messages=[asdict(m) for m in compiled.messages], prompt=prompt,
+                           metadata=self.diagnostics['context'], configuration=asdict(self.settings))
             async with asyncio.timeout(self.settings.generation_timeout):
                 await self.check_model()
                 async with self.client.stream("POST", "/v1/completions", json={

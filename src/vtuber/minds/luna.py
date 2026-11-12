@@ -13,6 +13,7 @@ from vtuber.contracts.context import CompactionProposal, ContextItem
 from vtuber.contracts.deep import DeepRequest, DeepResult, evidence_ids
 from vtuber.contracts.events import canonical_json
 from vtuber.contracts.state import NoteProposal
+from vtuber.contracts.trace import TraceSink, emit_trace
 
 
 def _object(value: object, keys: set[str]) -> dict:
@@ -90,11 +91,18 @@ def render_request(request: DeepRequest) -> str:
 
 
 class LunaDeep:
-    def __init__(self, transport: OMPTransport, identity: str) -> None:
+    def __init__(self, transport: OMPTransport, identity: str, *, trace: TraceSink | None = None) -> None:
         self.transport = transport
         self.identity = identity
+        self.trace = trace
 
     async def propose(self, request: DeepRequest) -> DeepResult:
         # Identity is authored separately from all untrusted canonical evidence.
         prompt = render_request(request)
-        return parse_result(await self.transport.request(prompt), request)
+        emit_trace(self.trace, 'deep.prompt', request.request_id, prompt=prompt)
+        if self.trace is None:
+            text = await self.transport.request(prompt)
+        else:
+            text = await self.transport.request(prompt, request_id=request.request_id)
+        emit_trace(self.trace, 'deep.response', request.request_id, text=text)
+        return parse_result(text, request)

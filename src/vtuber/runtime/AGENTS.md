@@ -8,6 +8,9 @@ One Runtime owns one database; new input supersedes its previous visible stream.
 Deep failures preserve the cursor. Do not turn audit events into new Deep work.
 Fast diagnostics are observational and bounded to the latest turn; never persist
 token chunks or provider configuration in domain events.
+An optional TraceSink captures immutable request/decision boundaries separately;
+failed capture cannot alter domain state. `cancel_fast()` serializes explicit user
+cancellation with submit/close. Keep before/after snapshots outside inference awaits.
 Schema v2 adds immutable context epochs; additive migration preserves all events,
 notes and cursors. Compaction CASes epoch + note revision and commits decision +
 epoch atomically, without acknowledging Deep. Validate source/range/turn boundaries;
