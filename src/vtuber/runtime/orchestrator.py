@@ -9,11 +9,11 @@ from typing import Literal
 from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage
 from vtuber.contracts.protocols import ContextPolicy, DeepMind, FastMind, OutputSink
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextBudgetExceeded
-from vtuber.contracts.state import FastSnapshot, NoteProposal
+from vtuber.contracts.state import FastSnapshot
+from vtuber.runtime.deep import DeepWorker
 from vtuber.runtime.journal import Journal
 
 logger = logging.getLogger(__name__)
-DIALOGUE_KINDS = {"user.message.completed", "character.reply.completed"}
 TERMINAL_OUTPUTS: dict[str, OutputKind] = {
     "completed": "reply.completed", "cancelled": "reply.cancelled", "failed": "reply.failed",
 }
@@ -23,6 +23,7 @@ class Runtime:
     def __init__(self, character_id: str, journal: Journal, fast: FastMind, deep: DeepMind,
                  output: OutputSink, *, deep_timeout: float = 30.0,
                  fast_diagnostics: dict[str, object] | None = None,
+                 deep_diagnostics: dict[str, object] | None = None,
                  context_policy: ContextPolicy | None = None) -> None:
         self.character_id = character_id
         self.journal = journal
@@ -31,13 +32,13 @@ class Runtime:
         self.output = output
         self.deep_timeout = deep_timeout
         self.context_policy = context_policy
-        self.deep_error: str | None = None
         self.fast_diagnostics = fast_diagnostics if fast_diagnostics is not None else {}
         self.last_cancellation_ms: float | None = None
-        self._wake = asyncio.Event()
+        self.deep_diagnostics = deep_diagnostics if deep_diagnostics is not None else {}
+        self._deep_worker = DeepWorker(character_id, journal, deep, self._emit,
+            timeout=deep_timeout, context_policy=context_policy, diagnostics=self.deep_diagnostics)
         self._input_lock = asyncio.Lock()
         self._fast_task: asyncio.Task[None] | None = None
-        self._deep_task: asyncio.Task[None] | None = None
         self._current: tuple[UserMessage, FastSnapshot] | None = None
         self._stopping = False
         self._started = False
@@ -45,15 +46,16 @@ class Runtime:
     async def start(self) -> None:
         if self._started or self._stopping:
             raise RuntimeError("Runtime cannot be started twice")
-        for started in self.journal.unfinished_replies(self.character_id):
+        for message in self.journal.unfinished_inputs(self.character_id):
+            started = self.journal.get(f'reply_started_{message.event_id}')
+            revision = (started.payload['snapshot_revision'] if started else
+                        self.journal.snapshot(self.character_id).revision)
             self.journal.append(Event.create(self.character_id, "character.reply.cancelled",
-                {"reason": "process_restarted", "snapshot_revision": started.payload["snapshot_revision"]},
-                event_id=f"reply_terminal_{started.causation_id}",
-                turn_id=started.turn_id, causation_id=started.causation_id))
+                {"reason": "process_restarted", "snapshot_revision": revision},
+                event_id=f"reply_terminal_{message.event_id}",
+                turn_id=message.turn_id, causation_id=message.event_id))
         self._started = True
-        self._deep_task = asyncio.create_task(self._run_deep(), name="vtuber-deep")
-        self._deep_task.add_done_callback(self._observe_task)
-        self._wake.set()
+        self._deep_worker.start()
 
     def _emit(self, output: RuntimeOutput) -> None:
         try:
@@ -76,7 +78,7 @@ class Runtime:
             self.journal.append(message.as_event())
             if duplicate:
                 return self._fast_task if self._current and self._current[0].event_id == message.event_id else None
-            self._wake.set()
+            self._deep_worker.notify()
             await self._cancel_fast("superseded")
             snapshot = self.journal.fast_snapshot(self.character_id)
             error = None
@@ -89,6 +91,8 @@ class Runtime:
                         if not result.accepted:
                             raise ValueError(f"Local compaction rejected: {result.reason}")
                         snapshot = self.journal.fast_snapshot(self.character_id)
+                    self._deep_worker.notify(compact=self.context_policy.input_tokens(snapshot, message)
+                        >= self.context_policy.input_limit * 3 // 4)
             except ContextBudgetExceeded as caught:
                 error = caught
             self.fast_diagnostics["preparation_ms"] = round((perf_counter() - start) * 1000, 3)
@@ -147,7 +151,7 @@ class Runtime:
             payload["reason"] = reason
         self.journal.append(Event.create(self.character_id, f"character.reply.{status}", payload,
             event_id=event_id, turn_id=message.turn_id, causation_id=message.event_id))
-        self._wake.set()
+        self._deep_worker.notify()
         self._emit(RuntimeOutput(TERMINAL_OUTPUTS[status], self.character_id, snapshot.state.revision,
                                  message.turn_id, text if status == "completed" else reason))
 
@@ -187,64 +191,24 @@ class Runtime:
             if was_active:
                 self.last_cancellation_ms = round((perf_counter() - start) * 1000, 2)
 
+    @property
+    def deep_error(self) -> str | None:
+        return self._deep_worker.error
+
     def retry_deep(self) -> None:
         if self._stopping or not self._started:
             raise RuntimeError("Runtime is not running")
-        self._wake.set()
-
-    async def _run_deep(self) -> None:
-        while True:
-            await self._wake.wait()
-            self._wake.clear()
-            while not self._stopping:
-                revision = 0
-                try:
-                    state = self.journal.snapshot(self.character_id)
-                    revision = state.revision
-                    cursor = self.journal.cursor(self.character_id)
-                    events = self.journal.read(self.character_id, after=cursor, limit=100)
-                    if not events:
-                        break
-                    through = events[-1].sequence
-                    if not any(event.kind in DIALOGUE_KINDS for event in events):
-                        self.journal.acknowledge(self.character_id, cursor, through)
-                        self.deep_error = None
-                        continue
-                    async with asyncio.timeout(self.deep_timeout):
-                        proposal = await self.deep.propose(state, events)
-                    if self._stopping:
-                        return
-                    if proposal is None:
-                        self.journal.acknowledge(self.character_id, cursor, through)
-                        text, revision = f"observed through #{through}", state.revision
-                    else:
-                        if (not isinstance(proposal, NoteProposal)
-                                or proposal.character_id != self.character_id
-                                or proposal.observed_through_sequence != through):
-                            raise ValueError("Deep returned an invalid batch proposal")
-                        result = self.journal.apply_note(proposal, cursor_from=cursor)
-                        text, revision = f"{result.reason}; through #{through}", result.revision
-                    self.deep_error = None
-                    self._emit(RuntimeOutput("deep.completed", self.character_id, revision, text=text))
-                except asyncio.CancelledError:
-                    raise
-                except Exception as error:
-                    self.deep_error = type(error).__name__
-                    self._emit(RuntimeOutput("deep.failed", self.character_id, revision, text=self.deep_error))
-                    break
+        self._deep_worker.retry()
 
     async def close(self) -> None:
         async with self._input_lock:
             if self._stopping:
                 return
             self._stopping = True
-            if self._deep_task is not None:
-                self._deep_task.cancel()
             try:
                 await self._cancel_fast("shutdown")
             finally:
-                if self._deep_task is not None:
-                    await asyncio.gather(self._deep_task, return_exceptions=True)
+                await self._deep_worker.close()
 
     async def __aenter__(self) -> "Runtime":
         await self.start()

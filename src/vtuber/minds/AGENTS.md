@@ -13,3 +13,5 @@ network tokenization per turn or silently fall back to a heuristic for real Fast
 The pinned GGUF adds BOS; wire prompts omit it and local counts add it exactly once.
 Verify provider/local parity at startup; a later usage mismatch latches generation
 off until revalidation. Do not bundle tokenizer assets or require tokenizers in fake mode.
+
+`omp.py` wraps the pinned official synchronous SDK off-loop; cancellation must join owned calls and confirm process exit before reconnect. `luna.py` strictly parses schema v1; `deep.md` is a role instruction, not a second identity. Disable tools/discovery and keep provider credentials out of diagnostics.

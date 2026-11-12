@@ -4,7 +4,7 @@
 
 Code lives in `src/vtuber/`: `contracts/` defines immutable data and ports, `runtime/` owns SQLite and task lifecycle, and `minds/` contains fake/LM Studio adapters and `character.md`. `context.py` compiles model-independent messages. `app.py` wires dependencies; `cli.py` is the inspector. Critical checks live in `tests/`. Local data defaults to ignored `.data/`.
 
-Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Luna, memory, behavior and external interfaces remain future milestones.
+Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Memory, behavior and external interfaces remain future milestones.
 
 ## Build, Test, and Development Commands
 
@@ -39,3 +39,5 @@ Credit softsock in PR descriptions too. Describe behavioral effects, affected in
 ## Agent & Configuration Rules
 
 Never use GPT-6 Astra for subagents. Keep changes within the requested milestone; future blueprint items are not current requirements. Keep secrets and private runtime data out of Git and diagnostics. Do not modify Loonyball, deploy, or install large services without an explicit request.
+
+M2 adds optional Luna via the pinned SDK-only vendor under `vendor/omp-rpc`. Install with `python -m pip install -r requirements-luna.txt`; fake mode requires neither SDK nor credentials. Deep returns versioned results; Runtime alone commits decisions and acknowledgement.

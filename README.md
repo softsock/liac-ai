@@ -1,8 +1,8 @@
 # liac-ai
 
-An autonomous AI VTuber backend. **M1.5** adds durable context epochs and local
-token budgeting for NVIDIA Nemotron through LM Studio. Deep remains a deterministic fake: it observes the
-durable journal asynchronously and proposes notes for subsequent turns.
+An autonomous AI VTuber backend. M2 connects optional GPT-6 Luna through OMP as
+an asynchronous Deep Mind alongside local Nemotron. Durable context epochs,
+exact local token budgeting and deterministic offline fallback remain from M1.5.
 
 ## Run
 
@@ -127,3 +127,17 @@ Deep/cancel checks; private raw logs and databases stay under ignored `.data/`.
 [PROJECT_BLUEPRINT](docs/PROJECT_BLUEPRINT.md) describes
 the wider project. One runtime owns a database at a time. Adapters must cooperate
 with cancellation. GPT-6 Luna/OMP is M2; it is not connected in this milestone.
+
+## Luna Deep Mind (M2)
+
+Install the optional pinned official Python SDK with `python -m pip install -r requirements-luna.txt`. Use an independently installed OMP 18.12.6 and existing authenticated `openai-codex` provider. No credentials are copied by this repository.
+
+```powershell
+python -m vtuber --fast-backend lmstudio --endpoint http://127.0.0.1:1230 --model liac-nemotron --deep-backend luna --luna-model openai-codex/gpt-6-luna --deep-timeout 60
+```
+
+`--omp-executable PATH` selects OMP; `--luna-data PATH` owns its workspace/session files (default `.data/luna`). The default Deep backend remains fake. `/status` and `/metrics` show bounded Deep lifecycle/usage/decision diagnostics; `/retry` starts a new retry cycle. Tools, extensions, skills, rules, LSP and project MCP discovery are disabled. This is application confinement, not an OS sandbox. Keep private runtime/session data out of Git and use one Runtime owner per database.
+
+Deep observes whole completed turns and proposes one working note plus optional semantic epoch. Preparation starts at 75% of the input budget; the 90% deterministic fallback continues when Luna is late/offline. Current Fast streams keep their frozen snapshot. Failed/stale batches retain the durable cursor and retry at 1/2/4/8/16 seconds, then remain degraded until new input or `/retry`. New processes rebuild Luna's disposable context from canonical evidence; the Journal remains authoritative. Summary sources prove provenance, not correctness. Notes can suggest a performance idea; a beat scheduler and permanent Memory Store remain future work.
+
+Provider `usage_limit_reached` latches Deep without repeated child launches; restart Runtime after provider availability returns. See [M2 results and limits](docs/M2_IMPLEMENTATION.md), including the interrupted quota sample and a failed short CLI recall.

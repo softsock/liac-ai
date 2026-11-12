@@ -16,6 +16,7 @@ import httpx
 from vtuber.app import Config, list_models, open_runtime
 from vtuber.contracts.events import RuntimeOutput, UserMessage, canonical_json
 from vtuber.minds.lmstudio import LMStudioSettings, StreamProtocolError
+from vtuber.minds.omp import OMPSettings
 
 
 async def input_lines() -> AsyncIterator[str]:
@@ -108,7 +109,7 @@ HELP = "Text sends a message. /state /events [count] /status /context /metrics /
 
 async def run(config: Config) -> None:
     async with open_runtime(config, ConsoleOutput()) as runtime:
-        print(f"Character Runtime | fast={config.fast_backend} | deep=fake | "
+        print(f"Character Runtime | fast={config.fast_backend} | deep={config.deep_backend} | "
               f"character={config.character_id} | db={config.db}", flush=True)
         print(HELP, flush=True)
         async with aclosing(input_lines()) as lines:
@@ -128,6 +129,7 @@ async def run(config: Config) -> None:
                         "deep_cursor": runtime.journal.cursor(config.character_id),
                         "journal_sequence": runtime.journal.high_watermark(config.character_id),
                         "deep_error": runtime.deep_error,
+                        "deep": runtime.deep_diagnostics,
                         "context_epoch": {"version": runtime.journal.context_epoch(config.character_id).version,
                             "cutoff": runtime.journal.context_epoch(config.character_id).compacted_through_sequence},
                         "fast": runtime.fast_diagnostics,
@@ -137,6 +139,7 @@ async def run(config: Config) -> None:
                     print(canonical_json(runtime.fast_diagnostics.get("context", {})), flush=True)
                 elif line == "/metrics":
                     print(canonical_json({"generation": runtime.fast_diagnostics.get("generation"),
+                        "deep": runtime.deep_diagnostics,
                         "preparation_ms": runtime.fast_diagnostics.get("preparation_ms"),
                         "last_cancellation_ms": runtime.last_cancellation_ms}), flush=True)
                 elif line == "/retry":
@@ -168,7 +171,11 @@ def main() -> None:
     parser.add_argument("--character", default="primary")
     parser.add_argument("--fast-delay", type=float, default=0.03, help="seconds per fake chunk")
     parser.add_argument("--deep-delay", type=float, default=2.0, help="seconds per fake batch")
-    parser.add_argument("--deep-timeout", type=float, default=30.0)
+    parser.add_argument("--deep-timeout", type=float, default=60.0)
+    parser.add_argument('--deep-backend', choices=('fake', 'luna'), default='fake')
+    parser.add_argument('--omp-executable', default='omp')
+    parser.add_argument('--luna-model', default='openai-codex/gpt-6-luna')
+    parser.add_argument('--luna-data', type=Path, default=OMPSettings.data_dir)
     parser.add_argument("--fast-backend", choices=("fake", "lmstudio"), default="fake")
     parser.add_argument("--endpoint", default=LMStudioSettings.endpoint, help="LM Studio server origin")
     parser.add_argument("--model", default="", help="loaded instance ID from --list-models")
@@ -190,7 +197,8 @@ def main() -> None:
             print(canonical_json(asyncio.run(list_models(settings))))
             return
         config = Config(args.db, args.character, args.fast_delay, args.deep_delay, args.deep_timeout,
-                        args.fast_backend, settings, args.context_tokens, args.identity, args.tokenizer)
+                        args.fast_backend, settings, args.context_tokens, args.identity, args.tokenizer,
+                        args.deep_backend, OMPSettings(args.omp_executable, args.luna_model, args.luna_data))
     except ValueError as error:
         parser.error(str(error))
     except (httpx.HTTPError, TimeoutError) as error:

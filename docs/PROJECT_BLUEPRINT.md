@@ -443,7 +443,7 @@ newer exact events; stale bases reject without rebasing. Raw events and Deep cur
 are unchanged. Deterministic fallback keeps an oldest-user anchor, recent extracts
 (2048-token block, 256-token/item cap) and up to three whole recent turns within
 2048 tokens. Extracts are incomplete projections, not a guarantee of remembering
-all important facts. Semantic Luna selection remains M2/FUTURE.
+all important facts. M2 adds optional semantic Luna selection; see `docs/M2_IMPLEMENTATION.md` for observed results and limits.
 
 A forgotten item can be restored from Luna's still-relevant context or from Memory/Journal asynchronously. It may arrive too late for the current Fast reply; system must not falsely guarantee zero-delay remembrance. Add cached memory retrieval to Fast only if it is demonstrably low-latency; otherwise keep it off critical path.
 
@@ -1005,3 +1005,11 @@ The newest upstream API and implementation take precedence over exact method nam
 ## Final project statement
 
 We are building an **autonomous, entertaining and coherent virtual character**, not a maximally capable assistant. One fast local model gives the character its immediate voice. A stronger asynchronous model receives the same durable stream of experience, maintains a richer working context, curates memory and proposes meaningful acts, jokes and longer-term motivations. A deliberately small deterministic backend owns event order, state, prompt composition, safety and persistence. The result must be inspectable, testable, recoverable, and easy for a coding agent to reason about without loading the entire project into context. Backend first; Loonyball only after that backend demonstrates a convincing first character.
+
+## M2 implementation decisions — 2026-11-12
+
+**DECIDED:** one serialized asynchronous observer uses the pinned official OMP Python SDK. Schema-v1 Deep results contain optional replacement context note and semantic epoch; model output supplies data/evidence only. Runtime assigns IDs/base dependencies and atomically commits decisions plus the existing cursor. Batches end only at closed turn boundaries; stale results retain the input for bounded reconsideration. New dialogue alone does not invalidate an older eligible cutoff. Notes also depend on the captured epoch; startup closes every unterminated accepted input, including one persisted before reply.started.
+
+**DECIDED:** preparation signals at 75% of the Fast input allowance; M1.5 fallback stays above 90%. Character Identity is shared; `deep.md` only supplies the hidden Deep role. Notes may suggest concrete performance ideas. The richer note operation/beat examples in section 9 are FUTURE; M2 has one replacement note and no beat scheduler, expiry/one-shot engine or Memory Store.
+
+**PROVISIONAL:** OMP 18.12.6 plus `openai-codex/gpt-6-luna` verified locally. Tools/discovery are disabled in an owned workspace; this is not OS isolation. OMP sessions are disposable and rebuilt from canonical request evidence after failure/restart. Usage-limit errors latch Deep until Runtime restart after provider availability returns; Fast remains independent. See [M2 implementation evidence](M2_IMPLEMENTATION.md) for timings, recall, recovery and explicit failed samples.

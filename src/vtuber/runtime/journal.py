@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from hashlib import sha256
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from vtuber.contracts.events import CharacterId, Event, canonical_json, utc_now
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextEpoch, ContextItem
 from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal, UpdateResult
 from vtuber.runtime.state import RevisionConflict, reduce_note
+from vtuber.contracts.deep import CompactionInput, DeepRequest, DeepResult, DeepDecision, evidence_ids
 
 
 class EventConflict(ValueError):
@@ -146,30 +148,33 @@ class Journal:
             self._db.execute("COMMIT")
 
     def apply_compaction(self, proposal: CompactionProposal) -> CompactionResult:
+        with self._transaction():
+            return self._apply_compaction(proposal)
+
+    def _apply_compaction(self, proposal: CompactionProposal) -> CompactionResult:
         # Reject malformed identities before SQL binding or constructing audit IDs.
         for value in (proposal.proposal_id, proposal.character_id):
             if not isinstance(value, str) or not 1 <= len(value.strip()) <= 200:
                 raise ValueError("Invalid compaction identity")
         encoded = canonical_json(asdict(proposal))
-        with self._transaction():
-            audit_id = f"compaction_{proposal.proposal_id}"
-            previous = self.get(audit_id)
-            if previous:
-                payload = previous.payload
-                if payload.get("proposal") != encoded:
-                    raise EventConflict(f"compaction proposal_id conflict: {proposal.proposal_id}")
-                return CompactionResult(payload["accepted"], payload["epoch_version"], payload["reason"])
-            epoch = self.context_epoch(proposal.character_id)
-            reason = self._validate_compaction(proposal, epoch)
-            if not reason:
-                epoch = ContextEpoch(epoch.version + 1, proposal.compacted_through_sequence, proposal.items)
-                self._db.execute("INSERT INTO context_epochs VALUES (?, ?, ?)",
-                    (proposal.character_id, epoch.version, canonical_json(asdict(epoch))))
-            result = CompactionResult(not reason, epoch.version, reason or "applied")
-            self._append(Event.create(proposal.character_id,
-                "context.epoch.rejected" if reason else "context.epoch.applied",
-                {"proposal": encoded, **asdict(result)}, event_id=audit_id))
-            return result
+        audit_id = f"compaction_{proposal.proposal_id}"
+        previous = self.get(audit_id)
+        if previous:
+            payload = previous.payload
+            if payload.get("proposal") != encoded:
+                raise EventConflict(f"compaction proposal_id conflict: {proposal.proposal_id}")
+            return CompactionResult(payload["accepted"], payload["epoch_version"], payload["reason"])
+        epoch = self.context_epoch(proposal.character_id)
+        reason = self._validate_compaction(proposal, epoch)
+        if not reason:
+            epoch = ContextEpoch(epoch.version + 1, proposal.compacted_through_sequence, proposal.items)
+            self._db.execute("INSERT INTO context_epochs VALUES (?, ?, ?)",
+                (proposal.character_id, epoch.version, canonical_json(asdict(epoch))))
+        result = CompactionResult(not reason, epoch.version, reason or "applied")
+        self._append(Event.create(proposal.character_id,
+            "context.epoch.rejected" if reason else "context.epoch.applied",
+            {"proposal": encoded, **asdict(result)}, event_id=audit_id))
+        return result
 
     def _validate_compaction(self, proposal: CompactionProposal, epoch: ContextEpoch) -> str:
         for value in (proposal.based_on_epoch, proposal.based_on_revision,
@@ -233,6 +238,128 @@ class Journal:
                                (character_id,)).fetchone()
         return row[0] if row else 0
 
+    def deep_request(self, character_id: str, *, request_id: str,
+                     max_events: int = 100, compact: bool = False) -> DeepRequest | None:
+        if max_events < 1 or not request_id.strip():
+            raise ValueError('Invalid Deep request')
+        with self._transaction():
+            cursor = self.cursor(character_id)
+            pending, safe, opened = [], 0, set()
+            for row in self._db.execute('SELECT * FROM events WHERE character_id=? AND sequence>? ORDER BY sequence',
+                                        (character_id, cursor)):
+                event = self._decode(row)
+                pending.append(event)
+                if event.kind == 'user.message.completed':
+                    opened.add(event.turn_id)
+                elif event.kind in ('character.reply.completed', 'character.reply.cancelled', 'character.reply.failed'):
+                    opened.discard(event.turn_id)
+                if not opened:
+                    safe = len(pending)
+                    if safe >= max_events:
+                        break
+            events = tuple(pending[:safe])
+            if not events and not compact:
+                return None
+            through = events[-1].sequence if events else cursor
+            dialogue = any(e.kind == 'user.message.completed' for e in events)
+            if events and not dialogue:
+                self._acknowledge(character_id, cursor, through)
+                cursor = through
+                events = ()
+            epoch = self.context_epoch(character_id)
+            rows = self._db.execute('SELECT * FROM events WHERE character_id=? AND sequence<=? ORDER BY sequence',
+                                    (character_id, through)).fetchall()
+            canonical = tuple(self._decode(row) for row in rows)
+            terminals = tuple(e for e in canonical if e.kind in (
+                'character.reply.completed', 'character.reply.cancelled', 'character.reply.failed'))
+            cutoff = terminals[-1].sequence if terminals else 0
+            eligible = tuple(e for e in canonical if e.kind in ('user.message.completed', 'character.reply.completed'))
+            compaction = None
+            if compact and cutoff > epoch.compacted_through_sequence:
+                previous = {s for item in epoch.items for s in item.source_event_ids}
+                evidence = tuple(e for e in eligible if e.sequence <= cutoff
+                    and (e.sequence > epoch.compacted_through_sequence or e.event_id in previous))
+                compaction = CompactionInput(cutoff, evidence)
+            if not dialogue and compaction is None:
+                return None
+            snapshot = FastSnapshot(self.snapshot(character_id), through,
+                tuple(e for e in eligible if e.sequence > epoch.compacted_through_sequence), epoch,
+                tuple((e.turn_id, e.sequence) for e in terminals if e.sequence > epoch.compacted_through_sequence))
+            # Audit records are decisions, not new observations for the model.
+            observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.')))
+            return DeepRequest(request_id, snapshot, cursor, observed, compaction)
+
+    def apply_deep(self, request: DeepRequest, result: DeepResult, *,
+                   compaction_error: str | None = None) -> DeepDecision:
+        fingerprint = sha256(canonical_json({'request': asdict(request), 'result': asdict(result),
+            'compaction_error': compaction_error}).encode()).hexdigest()
+        character = request.snapshot.state.character_id
+        audit_id = 'deep_' + request.request_id
+        with self._transaction():
+            previous = self.get(audit_id)
+            if previous:
+                payload = previous.payload
+                if payload['fingerprint'] != fingerprint:
+                    raise EventConflict('Deep request ID conflict')
+                value = payload['decision']
+                return DeepDecision(value['request_id'], UpdateResult(**value['note']) if value['note'] else None,
+                    CompactionResult(**value['compaction']) if value['compaction'] else None,
+                    value['acknowledged'], value['reason'])
+            if result.request_id != request.request_id or type(result.schema_version) is not int or result.schema_version != 1:
+                raise ValueError('Invalid Deep result envelope')
+            if self.cursor(character) != request.cursor_from:
+                raise ValueError('Deep cursor conflict')
+            reason = ''
+            state = self.snapshot(character)
+            epoch = self.context_epoch(character)
+            if result.note or result.compaction:
+                if request.snapshot.state.revision != state.revision:
+                    reason = 'revision_conflict'
+            if (result.note or result.compaction) and request.snapshot.epoch.version != epoch.version:
+                reason = reason or 'epoch_conflict'
+            evidence = evidence_ids(request)
+            if result.note:
+                p = result.note
+                if (p.proposal_id != request.request_id+':note' or p.character_id != character
+                        or p.based_on_revision != request.snapshot.state.revision
+                        or p.observed_through_sequence != request.snapshot.through_sequence
+                        or not set(p.source_event_ids) <= evidence):
+                    reason = reason or 'invalid_note_dependencies'
+                reason = reason or self._validate_proposal(p)
+            if result.compaction:
+                p = result.compaction
+                if (request.compaction is None or p.proposal_id != request.request_id+':epoch'
+                        or p.character_id != character or p.based_on_epoch != request.snapshot.epoch.version
+                        or p.based_on_revision != request.snapshot.state.revision
+                        or p.observed_through_sequence != request.snapshot.through_sequence
+                        or p.compacted_through_sequence != request.compaction.cutoff
+                        or any(s not in evidence for i in p.items for s in i.source_event_ids)):
+                    reason = reason or 'invalid_compaction_dependencies'
+                reason = reason or compaction_error or self._validate_compaction(p, epoch)
+            note_result = compaction_result = None
+            if reason:
+                if result.note:
+                    note_result = UpdateResult(False, state.revision, reason)
+                    self._append(Event.create(character, 'state.patch.rejected',
+                        {'proposal': canonical_json(asdict(result.note)), **asdict(note_result)},
+                        event_id='proposal_'+result.note.proposal_id))
+                if result.compaction:
+                    compaction_result = CompactionResult(False, epoch.version, reason)
+                    self._append(Event.create(character, 'context.epoch.rejected',
+                        {'proposal': canonical_json(asdict(result.compaction)), **asdict(compaction_result)},
+                        event_id='compaction_'+result.compaction.proposal_id))
+            else:
+                if result.compaction:
+                    compaction_result = self._apply_compaction(result.compaction)
+                if result.note:
+                    note_result = self._apply_note(result.note)
+                self._acknowledge(character, request.cursor_from, request.snapshot.through_sequence)
+            decision = DeepDecision(request.request_id, note_result, compaction_result, not reason, reason or 'applied')
+            self._append(Event.create(character, 'deep.batch.completed' if not reason else 'deep.batch.rejected',
+                {'fingerprint': fingerprint, 'decision': asdict(decision),
+                 'cursor_from': request.cursor_from, 'through': request.snapshot.through_sequence}, event_id=audit_id))
+            return decision
+
     def _acknowledge(self, character_id: CharacterId, expected: int, through: int) -> None:
         if not expected <= through <= self.high_watermark(character_id):
             raise ValueError("Invalid Deep cursor range")
@@ -247,37 +374,40 @@ class Journal:
 
     def apply_note(self, proposal: NoteProposal, *, cursor_from: int | None = None) -> UpdateResult:
         with self._transaction():
-            encoded = canonical_json(asdict(proposal))
-            audit_id = f"proposal_{proposal.proposal_id}"
-            previous = self.get(audit_id)
-            if previous:
-                payload = previous.payload
-                if payload.get("proposal") != encoded:
-                    raise EventConflict(f"proposal_id conflict: {proposal.proposal_id}")
-                if cursor_from is not None and self.cursor(proposal.character_id) < proposal.observed_through_sequence:
-                    self._acknowledge(proposal.character_id, cursor_from, proposal.observed_through_sequence)
-                return UpdateResult(payload["accepted"], payload["revision"], payload["reason"])
-            state = self.snapshot(proposal.character_id)
-            reason = self._validate_proposal(proposal)
-            if not reason:
-                try:
-                    state = reduce_note(state, proposal)
-                except RevisionConflict:
-                    reason = "revision_conflict"
-            accepted = not reason
-            self._db.execute("INSERT OR IGNORE INTO character_state(character_id) VALUES (?)",
-                             (proposal.character_id,))
-            if accepted:
-                self._db.execute("UPDATE character_state SET revision=?, context_note=? WHERE character_id=?",
-                                 (state.revision, state.context_note, state.character_id))
-            result = UpdateResult(accepted, state.revision, reason or "applied")
-            self._append(Event.create(proposal.character_id,
-                "state.patch.applied" if accepted else "state.patch.rejected",
-                {"proposal": encoded, **asdict(result)}, event_id=audit_id,
-                causation_id=proposal.source_event_ids[-1] if proposal.source_event_ids else None))
-            if cursor_from is not None:
+            return self._apply_note(proposal, cursor_from=cursor_from)
+
+    def _apply_note(self, proposal: NoteProposal, *, cursor_from: int | None = None) -> UpdateResult:
+        encoded = canonical_json(asdict(proposal))
+        audit_id = f"proposal_{proposal.proposal_id}"
+        previous = self.get(audit_id)
+        if previous:
+            payload = previous.payload
+            if payload.get("proposal") != encoded:
+                raise EventConflict(f"proposal_id conflict: {proposal.proposal_id}")
+            if cursor_from is not None and self.cursor(proposal.character_id) < proposal.observed_through_sequence:
                 self._acknowledge(proposal.character_id, cursor_from, proposal.observed_through_sequence)
-            return result
+            return UpdateResult(payload["accepted"], payload["revision"], payload["reason"])
+        state = self.snapshot(proposal.character_id)
+        reason = self._validate_proposal(proposal)
+        if not reason:
+            try:
+                state = reduce_note(state, proposal)
+            except RevisionConflict:
+                reason = "revision_conflict"
+        accepted = not reason
+        self._db.execute("INSERT OR IGNORE INTO character_state(character_id) VALUES (?)",
+                         (proposal.character_id,))
+        if accepted:
+            self._db.execute("UPDATE character_state SET revision=?, context_note=? WHERE character_id=?",
+                             (state.revision, state.context_note, state.character_id))
+        result = UpdateResult(accepted, state.revision, reason or "applied")
+        self._append(Event.create(proposal.character_id,
+            "state.patch.applied" if accepted else "state.patch.rejected",
+            {"proposal": encoded, **asdict(result)}, event_id=audit_id,
+            causation_id=proposal.source_event_ids[-1] if proposal.source_event_ids else None))
+        if cursor_from is not None:
+            self._acknowledge(proposal.character_id, cursor_from, proposal.observed_through_sequence)
+        return result
 
     def _validate_proposal(self, proposal: NoteProposal) -> str:
         if not isinstance(proposal.proposal_id, str) or not proposal.proposal_id.strip():
@@ -306,6 +436,17 @@ class Journal:
             AND NOT EXISTS (SELECT 1 FROM events AS ended
                 WHERE ended.character_id=started.character_id
                 AND json_extract(ended.content, '$.turn_id')=json_extract(started.content, '$.turn_id')
+                AND json_extract(ended.content, '$.kind') IN
+                    ('character.reply.completed', 'character.reply.cancelled', 'character.reply.failed'))
+            ORDER BY sequence""", (character_id,)).fetchall()
+        return tuple(self._decode(row) for row in rows)
+
+    def unfinished_inputs(self, character_id: CharacterId) -> tuple[Event, ...]:
+        rows = self._db.execute("""SELECT * FROM events AS input WHERE character_id=?
+            AND json_extract(content, '$.kind') = 'user.message.completed'
+            AND NOT EXISTS (SELECT 1 FROM events AS ended
+                WHERE ended.character_id=input.character_id
+                AND json_extract(ended.content, '$.turn_id')=json_extract(input.content, '$.turn_id')
                 AND json_extract(ended.content, '$.kind') IN
                     ('character.reply.completed', 'character.reply.cancelled', 'character.reply.failed'))
             ORDER BY sequence""", (character_id,)).fetchall()

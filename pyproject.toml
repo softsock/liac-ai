@@ -19,4 +19,4 @@ vtuber = "vtuber.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"vtuber.minds" = ["character.md"]
+"vtuber.minds" = ["character.md", "deep.md"]

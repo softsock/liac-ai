@@ -16,6 +16,8 @@ from vtuber.contracts.protocols import FastMind, OutputSink
 from vtuber.minds.fake import FakeDeep, FakeFast
 from vtuber.minds.lmstudio import LMStudioFast, LMStudioSettings
 from vtuber.minds.nemotron import NemotronTokenCounter
+from vtuber.minds.omp import OMPSettings, OMPTransport
+from vtuber.minds.luna import LunaDeep
 from vtuber.runtime.journal import Journal
 from vtuber.runtime.orchestrator import Runtime
 
@@ -32,6 +34,8 @@ class Config:
     context_tokens: int = 16384
     identity: Path | None = None
     tokenizer: Path = Path(".data/tokenizers/nemotron.json")
+    deep_backend: str = 'fake'
+    omp: OMPSettings = field(default_factory=OMPSettings)
 
     def __post_init__(self) -> None:
         if not self.character_id.strip():
@@ -42,6 +46,8 @@ class Config:
             raise ValueError("Deep timeout must be finite and positive")
         if self.fast_backend not in ("fake", "lmstudio"):
             raise ValueError("Unknown Fast backend")
+        if self.deep_backend not in ('fake', 'luna'):
+            raise ValueError('Unknown Deep backend')
         if not 0 < self.lmstudio.max_output_tokens < self.context_tokens:
             raise ValueError("Context budget must exceed the output reserve")
         if self.fast_backend == "lmstudio" and not self.lmstudio.model.strip():
@@ -81,7 +87,14 @@ async def open_runtime(config: Config, output: OutputSink) -> AsyncIterator[Runt
             await fast.verify_token_count()
         journal = Journal(config.db)
         stack.callback(journal.close)
+        deep = FakeDeep(config.deep_delay)
+        deep_diagnostics: dict[str, object] = {'backend': config.deep_backend}
+        if config.deep_backend == 'luna':
+            role = files('vtuber.minds').joinpath('deep.md').read_text(encoding='utf-8')
+            transport = OMPTransport(config.omp, role+'\n\nCharacter Identity:\n'+identity, deep_diagnostics)
+            stack.push_async_callback(transport.close)
+            deep = LunaDeep(transport, identity)
         runtime = await stack.enter_async_context(Runtime(config.character_id, journal, fast,
-            FakeDeep(config.deep_delay), output, deep_timeout=config.deep_timeout,
+            deep, output, deep_timeout=config.deep_timeout, deep_diagnostics=deep_diagnostics,
             fast_diagnostics=diagnostics, context_policy=compiler))
         yield runtime

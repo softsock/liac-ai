@@ -13,3 +13,7 @@ notes and cursors. Compaction CASes epoch + note revision and commits decision +
 epoch atomically, without acknowledging Deep. Validate source/range/turn boundaries;
 no cutoff may split an exchange or cover an unfinished turn. Reject stale proposals
 without rebasing. Read state/epoch/watermark/exact history in one short transaction.
+
+M2 `deep.py` owns one serialized observer, complete-turn batches and bounded retry. `apply_deep` commits all operation decisions plus cursor together; stale dependencies retain input for reconsideration. Audit-only tails never become model work. No-op compaction is coalesced by epoch/revision/cutoff.
+
+Notes and compaction both depend on the captured epoch. Startup cancels every accepted input without a terminal, including inputs persisted before reply.started. Worker stop prevents post-close application even when an adapter swallows cancellation.
