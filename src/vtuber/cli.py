@@ -11,8 +11,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import AsyncIterator
 
-from vtuber.app import Config, open_runtime
+import httpx
+
+from vtuber.app import Config, list_models, open_runtime
 from vtuber.contracts.events import RuntimeOutput, UserMessage, canonical_json
+from vtuber.minds.lmstudio import LMStudioSettings
 
 
 async def input_lines() -> AsyncIterator[str]:
@@ -91,7 +94,8 @@ class ConsoleOutput:
         elif output.kind == "reply.delta":
             print(output.text, end="", flush=True)
         elif output.kind.startswith("reply."):
-            print(f"\n[{output.kind}]", flush=True)
+            detail = f": {output.text}" if output.kind == "reply.failed" else ""
+            print(f"\n[{output.kind}{detail}]", flush=True)
             self.streaming = False
         else:
             if self.streaming:
@@ -99,12 +103,13 @@ class ConsoleOutput:
             print(f"[{output.kind} r{output.revision}: {output.text}]", flush=True)
 
 
-HELP = "Text sends a message. /state /events [count] /status /retry /help /quit"
+HELP = "Text sends a message. /state /events [count] /status /context /metrics /retry /help /quit"
 
 
 async def run(config: Config) -> None:
     async with open_runtime(config, ConsoleOutput()) as runtime:
-        print(f"M0 fake runtime | character={config.character_id} | db={config.db}", flush=True)
+        print(f"Character Runtime | fast={config.fast_backend} | deep=fake | "
+              f"character={config.character_id} | db={config.db}", flush=True)
         print(HELP, flush=True)
         async with aclosing(input_lines()) as lines:
             async for line in lines:
@@ -122,7 +127,14 @@ async def run(config: Config) -> None:
                         "deep_cursor": runtime.journal.cursor(config.character_id),
                         "journal_sequence": runtime.journal.high_watermark(config.character_id),
                         "deep_error": runtime.deep_error,
+                        "fast": runtime.fast_diagnostics,
+                        "last_cancellation_ms": runtime.last_cancellation_ms,
                     }), flush=True)
+                elif line == "/context":
+                    print(canonical_json(runtime.fast_diagnostics.get("context", {})), flush=True)
+                elif line == "/metrics":
+                    print(canonical_json({"generation": runtime.fast_diagnostics.get("generation"),
+                        "last_cancellation_ms": runtime.last_cancellation_ms}), flush=True)
                 elif line == "/retry":
                     runtime.retry_deep()
                     print("Deep notified", flush=True)
@@ -147,18 +159,41 @@ async def run(config: Config) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inspect the M0 Character Runtime with fake minds")
+    parser = argparse.ArgumentParser(description="Character Runtime: fake or local Nemotron Fast; fake Deep")
     parser.add_argument("--db", type=Path, default=Config.db)
     parser.add_argument("--character", default="primary")
     parser.add_argument("--fast-delay", type=float, default=0.03, help="seconds per fake chunk")
     parser.add_argument("--deep-delay", type=float, default=2.0, help="seconds per fake batch")
     parser.add_argument("--deep-timeout", type=float, default=30.0)
+    parser.add_argument("--fast-backend", choices=("fake", "lmstudio"), default="fake")
+    parser.add_argument("--endpoint", default=LMStudioSettings.endpoint, help="LM Studio server origin")
+    parser.add_argument("--model", default="", help="loaded instance ID from --list-models")
+    parser.add_argument("--context-tokens", type=int, default=16384)
+    parser.add_argument("--max-output-tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--connect-timeout", type=float, default=2.0)
+    parser.add_argument("--read-timeout", type=float, default=15.0, help="seconds without response data")
+    parser.add_argument("--generation-timeout", type=float, default=45.0, help="total seconds including preflight")
+    parser.add_argument("--identity", type=Path, help="UTF-8 Markdown; loaded at process start")
+    parser.add_argument("--list-models", action="store_true", help="inspect server models/loaded instances and exit")
     args = parser.parse_args()
     try:
-        config = Config(args.db, args.character, args.fast_delay, args.deep_delay, args.deep_timeout)
+        settings = LMStudioSettings(args.endpoint, args.model, args.max_output_tokens,
+            args.temperature, args.top_p, args.connect_timeout, args.read_timeout, args.generation_timeout)
+        if args.list_models:
+            print(canonical_json(asyncio.run(list_models(settings))))
+            return
+        config = Config(args.db, args.character, args.fast_delay, args.deep_delay, args.deep_timeout,
+                        args.fast_backend, settings, args.context_tokens, args.identity)
     except ValueError as error:
         parser.error(str(error))
+    except (httpx.HTTPError, TimeoutError) as error:
+        parser.exit(1, f"LM Studio connection failed ({type(error).__name__}); "
+                    "check --endpoint, server status and LMSTUDIO_API_TOKEN.\n")
     try:
         asyncio.run(run(config))
     except KeyboardInterrupt:
         print("\nRuntime interrupted; resources closed.")
+    except (OSError, ValueError) as error:
+        parser.exit(1, f"Runtime setup failed ({type(error).__name__}); check --identity and --db.\n")

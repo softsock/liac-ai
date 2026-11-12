@@ -7,10 +7,13 @@ name = "liac-ai"
 version = "0.1.0"
 description = "Autonomous AI VTuber character runtime"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["httpx>=0.28,<0.29"]
 
 [project.scripts]
 vtuber = "vtuber.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"vtuber.minds" = ["character.md"]

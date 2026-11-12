@@ -2,16 +2,17 @@
 
 ## Project Structure & Module Organization
 
-M0 lives in `src/vtuber/`: `contracts/` defines immutable data and ports, `runtime/` owns SQLite and task lifecycle, and `minds/` contains fake adapters. `app.py` wires dependencies; `cli.py` is the inspector. Critical checks live in `tests/`. Local data defaults to ignored `.data/`.
+Code lives in `src/vtuber/`: `contracts/` defines immutable data and ports, `runtime/` owns SQLite and task lifecycle, and `minds/` contains fake/LM Studio adapters and `character.md`. `context.py` compiles model-independent messages. `app.py` wires dependencies; `cli.py` is the inspector. Critical checks live in `tests/`. Local data defaults to ignored `.data/`.
 
-Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, `docs/M0_IMPLEMENTATION.md` and nearest module `AGENTS.md` before editing. Memory, behavior and external interfaces remain future milestones.
+Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Luna, memory, behavior and external interfaces remain future milestones.
 
 ## Build, Test, and Development Commands
 
-Use Python 3.12+ and a virtual environment. No runtime dependencies, formatter or linter are configured.
+Use Python 3.12+ and a virtual environment. HTTPX is the only direct runtime dependency; no formatter or linter is configured.
 
 - `python -m pip install -e .` — install the package in the active environment.
 - `python -m vtuber` — run the fake-backed CLI.
+- `python -m vtuber --fast-backend lmstudio --endpoint URL --model ID` — stream from loaded Nemotron; see README setup.
 - `python -m unittest discover -s tests -v` — run critical invariant checks.
 - `git diff --check` and `git status --short` — inspect whitespace and changed/untracked files.
 
@@ -23,7 +24,7 @@ Use four-space indentation, `snake_case` functions/modules, `PascalCase` classes
 
 ## Testing Guidelines
 
-Use stdlib `unittest`; no coverage threshold. Name tests `test_*.py`. Focus on atomicity, idempotency, revisions, recovery and cancellation with real SQLite files. Verify milestone behavior through the CLI and record actual results. Fake-driven checks do not establish LM Studio/OMP compatibility.
+Use stdlib `unittest`; no coverage threshold. Name tests `test_*.py`. Focus on atomicity, idempotency, revisions, recovery, context boundaries and stream cancellation. Verify milestone behavior through the CLI and record actual results. Fake/transport checks do not establish live provider compatibility.
 
 ## Commit & Pull Request Guidelines
 
