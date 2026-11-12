@@ -85,6 +85,6 @@ class ContextCompiler:
             remaining -= cost
         included.reverse()
         dropped = [e.event_id for e in history[:len(history) - len(included)]]
-        return CompiledContext((system, state, *reversed(selected), current),
+        return CompiledContext((system, *reversed(selected), state, current),
             self.context_tokens - self.output_tokens - remaining, len(included), len(dropped),
             tuple(included), tuple(dropped), snapshot.state.revision, snapshot.through_sequence)

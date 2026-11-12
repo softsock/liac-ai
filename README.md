@@ -64,11 +64,19 @@ avoids LM Studio silently ignoring `chat_template_kwargs`. No global model
 settings need changing. Reasoning/control output causes a failed turn.
 
 Edit [character.md](src/vtuber/minds/character.md), or pass `--identity path/to/soul.md`;
-identity loads once at startup. The compiler pins identity, quoted state/note and
-current input, then fits the newest whole history messages from M0's bounded
-20-event dialogue window. It reserves output space and rejects oversized required
-content instead of truncating it. Its UTF-8 byte estimate is deliberately
+identity loads once at startup. The compiler orders identity, retained exact history,
+quoted state/note, then current input. History comes from M0's bounded 20-event
+dialogue window; changing a note preserves the prefix when retained history stays
+unchanged. A longer note can evict history under budget pressure. It reserves
+output space and rejects oversized required content instead of truncating it. Its UTF-8 byte estimate is deliberately
 conservative, **not an exact tokenizer count**; it can substantially underfill 16K.
+
+On the verified LM Studio runtime, a synthetic ~15.5K-token note update evaluated
+22 input tokens with this order, versus 15483 with the previous order (median TTFT
+73 versus 1997 ms). Shifting the history window still evaluated the full input.
+Explicit cache counts were unavailable. Reuse depends on the loaded engine/settings; these are local
+measurements, not a latency guarantee. See the [follow-up results](docs/M1_IMPLEMENTATION.md#m1-context-cache-follow-up--2026-11-12)
+for exact sizes, counters, production-compiler limits and remaining acceptance gaps.
 
 Useful settings: `--context-tokens 16384 --max-output-tokens 512 --temperature 1
 --top-p 0.95 --connect-timeout 2 --read-timeout 15 --generation-timeout 45`.
