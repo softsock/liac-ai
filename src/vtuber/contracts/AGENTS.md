@@ -9,7 +9,3 @@ Snapshots include terminal turn boundaries so cancelled turns can be compacted
 without retaining partial speech. Future summary sources prove provenance only.
 
 `deep.py` defines versioned DeepRequest/DeepResult/DeepDecision. The Runtime assigns operation IDs and dependency metadata; models supply only note/summary data and evidence IDs.
-
-`attention.py` defines frozen proposals/signals/views and shared captured-evidence
-validation. Deep schema v2 includes attention. Outcome and Runtime lifecycle status
-are separate; sources do not prove semantic truth. No beat consumption contract yet.

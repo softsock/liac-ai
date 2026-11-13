@@ -1,7 +1,7 @@
 # liac-ai
 
-An autonomous AI VTuber backend. M4.1 extends optional GPT-6 Luna through OMP with
-selective, durable attention alongside local Nemotron. Durable context epochs,
+An autonomous AI VTuber backend. M2 connects optional GPT-6 Luna through OMP as
+an asynchronous Deep Mind alongside local Nemotron. Durable context epochs,
 exact local token budgeting and deterministic offline fallback remain from M1.5.
 
 ## Run
@@ -27,32 +27,6 @@ The default `--fast-backend fake` works without a model server.
 Type text to start a turn. Commands: `/state`, `/events [1..100]`, `/status`,
 `/context`, `/metrics`, `/retry` (wake a failed Deep consumer), `/help`, `/quit`. EOF and Ctrl+C also
 close the runtime. New messages cancel the previous response.
-
-## Attention (M4.1)
-
-Luna can notice, defer or ignore source-backed conversational changes. Runtime
-persists and validates signals; they do not execute beats or inject instructions
-into Fast. Ordinary/repeated messages can produce no signals. Run with the Luna
-setup below, then inspect:
-
-```text
-/attention
-/attention deferred 20
-/attention-source EVENT_ID
-/status
-```
-
-Filters: `noticed`, `deferred`, `ignored`, `superseded`, `expired`; count 1..100.
-Records include reason, significance, Journal source IDs, version and expiry.
-Deferred observations are reconsidered with the next completed-turn batch, never
-by a timer-only LLM call. Boundary/correction candidates rank before opportunities.
-Desktop request/response JSON also includes attention; CLI owns the dedicated view.
-
-Opening a database migrates it additively to **schema v3**. Back up existing data
-first: older builds, including the committed `LIAC-Inspector.exe`, cannot open v3.
-Use `Start-Inspector.cmd` or `python -m vtuber.desktop` for this source version;
-the executable has not been rebuilt for M4.1. New databases avoid mixing versions.
-See [M4.1 results and limits](docs/M4_1_IMPLEMENTATION.md).
 
 To see independence clearly, run `python -m vtuber --deep-delay 5`. Send a message,
 then another before Deep finishes. After `[deep.completed ...]`, inspect `/state`

@@ -35,7 +35,7 @@ class JournalTests(unittest.TestCase):
         self.journal = Journal(self.path)
         self.addCleanup(self.journal.close)
         with closing(sqlite3.connect(self.path)) as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 2)
             self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         self.assertEqual(self.journal.context_epoch('primary').version, 0)
         self.assertEqual(self.journal.snapshot('primary'), state)

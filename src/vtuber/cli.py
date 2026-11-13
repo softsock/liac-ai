@@ -15,7 +15,6 @@ import httpx
 
 from vtuber.app import Config, list_models, open_runtime
 from vtuber.contracts.events import RuntimeOutput, UserMessage, canonical_json
-from vtuber.contracts.attention import STATUSES
 from vtuber.minds.lmstudio import LMStudioSettings, StreamProtocolError
 from vtuber.minds.omp import OMPSettings
 
@@ -105,8 +104,7 @@ class ConsoleOutput:
             print(f"[{output.kind} r{output.revision}: {output.text}]", flush=True)
 
 
-HELP = ("Text sends a message. /state /events [count] /status /context /metrics /retry "
-        "/attention [status] [count] /attention-source EVENT_ID /help /quit")
+HELP = "Text sends a message. /state /events [count] /status /context /metrics /retry /help /quit"
 
 
 async def run(config: Config) -> None:
@@ -147,27 +145,6 @@ async def run(config: Config) -> None:
                 elif line == "/retry":
                     runtime.retry_deep()
                     print("Deep notified", flush=True)
-                elif line.split()[0] == '/attention':
-                    try:
-                        parts = line.split()[1:]
-                        status = parts.pop(0) if parts and parts[0] in STATUSES else None
-                        count = int(parts[0]) if len(parts) == 1 else 20 if not parts else 0
-                        signals = runtime.journal.attention_signals(config.character_id, status=status, limit=count)
-                    except ValueError:
-                        print('Usage: /attention [noticed|deferred|ignored|superseded|expired] [1..100]', flush=True)
-                        continue
-                    print(canonical_json({'through_sequence': runtime.journal.cursor(config.character_id),
-                        'signals': [asdict(s) for s in signals]}), flush=True)
-                elif line.split()[0] == '/attention-source':
-                    parts = line.split()
-                    if len(parts) != 2:
-                        print('Usage: /attention-source EVENT_ID', flush=True)
-                        continue
-                    event = runtime.journal.get(parts[1])
-                    if event is None or event.character_id != config.character_id:
-                        print('Source not found for this character', flush=True)
-                    else:
-                        print(canonical_json(asdict(event)), flush=True)
                 elif line.split()[0] == "/events":
                     try:
                         parts = line.split()

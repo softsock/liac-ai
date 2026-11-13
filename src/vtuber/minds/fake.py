@@ -29,9 +29,9 @@ class FakeDeep:
         state, events = request.snapshot.state, request.events
         messages = [event for event in events if event.kind == "user.message.completed"]
         if not messages:
-            return DeepResult(2, request.request_id)
+            return DeepResult(1, request.request_id)
         latest = messages[-1]
-        return DeepResult(2, request.request_id, NoteProposal(
+        return DeepResult(1, request.request_id, NoteProposal(
             request.request_id + ':note',
             state.character_id, state.revision, events[-1].sequence,
             (latest.event_id,), f"Last user message: {latest.payload['text'][:160]}"))
