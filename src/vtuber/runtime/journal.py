@@ -7,12 +7,17 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Iterator
+from datetime import datetime, timezone
+from typing import Callable
+from time import monotonic as monotonic_time
 
 from vtuber.contracts.events import CharacterId, Event, canonical_json, utc_now
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextEpoch, ContextItem
 from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal, UpdateResult
 from vtuber.runtime.state import RevisionConflict, reduce_note
 from vtuber.contracts.deep import CompactionInput, DeepRequest, DeepResult, DeepDecision, evidence_ids
+from vtuber.contracts.attention import AttentionSignal, AttentionView, STATUSES
+from vtuber.runtime.attention import attention_key, decode_signal, prepare_attention, rank_signal
 
 
 class EventConflict(ValueError):
@@ -20,7 +25,12 @@ class EventConflict(ValueError):
 
 
 class Journal:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, clock: Callable[[], datetime] | None = None,
+                 monotonic: Callable[[], float] = monotonic_time) -> None:
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic
+        self._attention_deadlines: dict[str, tuple[int, float, str]] = {}
+        self._deadline_rollback = None
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, isolation_level=None)
@@ -29,7 +39,7 @@ class Journal:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=FULL")
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ValueError(f"Unsupported database version: {version}")
             with self._transaction():
                 self._db.execute("""CREATE TABLE IF NOT EXISTS events (
@@ -45,7 +55,25 @@ class Journal:
                 self._db.execute("""CREATE TABLE IF NOT EXISTS context_epochs (
                     character_id TEXT NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL,
                     PRIMARY KEY(character_id, version))""")
-                self._db.execute("PRAGMA user_version=2")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS attention_signals (
+                    character_id TEXT NOT NULL, signal_id TEXT PRIMARY KEY, provenance_key TEXT NOT NULL,
+                    creation_sequence INTEGER NOT NULL, content TEXT NOT NULL,
+                    UNIQUE(character_id, provenance_key))""")
+                needs_aliases = version == 3 and self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attention_provenance'").fetchone() is None
+                self._db.execute("""CREATE TABLE IF NOT EXISTS attention_provenance (
+                    character_id TEXT NOT NULL, provenance_key TEXT NOT NULL, signal_id TEXT NOT NULL,
+                    PRIMARY KEY(character_id, provenance_key))""")
+                if needs_aliases:
+                    # Recover aliases when opening a development v3 database made before this index.
+                    for row in self._db.execute("""SELECT content FROM events WHERE
+                        json_extract(content, '$.kind') LIKE 'attention.signal.%' ORDER BY sequence"""):
+                        signal = json.loads(row[0])['payload_json']
+                        signal = json.loads(signal)['signal']
+                        self._db.execute('INSERT OR IGNORE INTO attention_provenance VALUES (?, ?, ?)',
+                            (signal['character_id'], attention_key(signal['character_id'], signal['kind'],
+                             tuple(signal['source_event_ids'])), signal['signal_id']))
+                self._db.execute("PRAGMA user_version=3")
         except BaseException:
             self._db.close()
             raise
@@ -58,7 +86,11 @@ class Journal:
             self._db.execute("COMMIT")
         except BaseException:
             self._db.execute("ROLLBACK")
+            if self._deadline_rollback is not None:
+                self._attention_deadlines = self._deadline_rollback
             raise
+        finally:
+            self._deadline_rollback = None
 
     def close(self) -> None:
         self._db.close()
@@ -238,10 +270,72 @@ class Journal:
                                (character_id,)).fetchone()
         return row[0] if row else 0
 
+    def _attention_all(self, character_id: str) -> tuple[AttentionSignal, ...]:
+        return tuple(decode_signal(json.loads(row[0])) for row in self._db.execute(
+            'SELECT content FROM attention_signals WHERE character_id=? ORDER BY creation_sequence DESC',
+            (character_id,)))
+
+    def attention_signals(self, character_id: str, *, status: str | None = None,
+                          limit: int = 20, before: int | None = None) -> tuple[AttentionSignal, ...]:
+        if (type(limit) is not int or not 1 <= limit <= 100 or status is not None and status not in STATUSES
+                or before is not None and (type(before) is not int or before < 1)):
+            raise ValueError('Invalid attention filter')
+        self.expire_attention(character_id)
+        rows = self._db.execute("""SELECT content FROM attention_signals WHERE character_id=?
+            AND (? IS NULL OR json_extract(content, '$.status')=?)
+            AND (? IS NULL OR creation_sequence<?) ORDER BY creation_sequence DESC LIMIT ?""",
+            (character_id, status, status, before, before, limit))
+        return tuple(decode_signal(json.loads(row[0])) for row in rows)
+
+    def attention_candidates(self, character_id: str) -> AttentionView:
+        self.expire_attention(character_id)
+        return AttentionView(self.cursor(character_id), tuple(sorted(
+            (s for s in self._attention_all(character_id) if s.status == 'noticed'), key=rank_signal)))
+
+    def _store_attention(self, signal: AttentionSignal, *, request_id: str | None = None) -> None:
+        old = self._db.execute('SELECT creation_sequence FROM attention_signals WHERE signal_id=?',
+                               (signal.signal_id,)).fetchone()
+        action = signal.status if signal.status in ('superseded', 'expired') else ('updated' if old else 'created')
+        event = self._append(Event.create(signal.character_id, 'attention.signal.' + action,
+            {'signal': asdict(signal), 'request_id': request_id},
+            event_id=f'attention_{signal.signal_id}_v{signal.version}'))
+        self._db.execute("""INSERT INTO attention_signals VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(signal_id) DO UPDATE SET provenance_key=excluded.provenance_key, content=excluded.content""",
+            (signal.character_id, signal.signal_id, attention_key(signal.character_id, signal.kind, signal.source_event_ids),
+             old[0] if old else event.sequence, canonical_json(asdict(signal))))
+        self._db.execute('INSERT OR IGNORE INTO attention_provenance VALUES (?, ?, ?)',
+            (signal.character_id, attention_key(signal.character_id, signal.kind, signal.source_event_ids), signal.signal_id))
+        self._attention_expired(signal, self._clock())
+
+    def _attention_expired(self, signal: AttentionSignal, now: datetime) -> bool:
+        if self._db.in_transaction and self._deadline_rollback is None:
+            self._deadline_rollback = self._attention_deadlines.copy()
+        if signal.status not in ('noticed', 'deferred') or signal.expires_at is None:
+            self._attention_deadlines.pop(signal.signal_id, None)
+            return False
+        expiry = datetime.fromisoformat(signal.expires_at)
+        previous = self._attention_deadlines.get(signal.signal_id)
+        if previous is None or previous[0] != signal.version:
+            deadline = self._monotonic() + max(0, (expiry - now).total_seconds())
+            if previous is not None and expiry <= datetime.fromisoformat(previous[2]):
+                deadline = min(deadline, previous[1])
+            previous = (signal.version, deadline, signal.expires_at)
+            self._attention_deadlines[signal.signal_id] = previous
+        return expiry <= now or self._monotonic() >= previous[1]
+
+    def expire_attention(self, character_id: str) -> int:
+        now = self._clock()
+        with self._transaction():
+            expired = [s for s in self._attention_all(character_id) if self._attention_expired(s, now)]
+            for signal in expired:
+                self._store_attention(replace(signal, version=signal.version + 1, status='expired', updated_at=now.isoformat()))
+            return len(expired)
+
     def deep_request(self, character_id: str, *, request_id: str,
                      max_events: int = 100, compact: bool = False) -> DeepRequest | None:
         if max_events < 1 or not request_id.strip():
             raise ValueError('Invalid Deep request')
+        self.expire_attention(character_id)
         with self._transaction():
             cursor = self.cursor(character_id)
             pending, safe, opened = [], 0, set()
@@ -286,8 +380,12 @@ class Journal:
                 tuple(e for e in eligible if e.sequence > epoch.compacted_through_sequence), epoch,
                 tuple((e.turn_id, e.sequence) for e in terminals if e.sequence > epoch.compacted_through_sequence))
             # Audit records are decisions, not new observations for the model.
-            observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.')))
-            return DeepRequest(request_id, snapshot, cursor, observed, compaction)
+            observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.', 'attention.')))
+            attention = tuple(sorted((s for s in self._attention_all(character_id)
+                                      if s.status in ('noticed', 'deferred')), key=rank_signal))
+            source_ids = {s for signal in attention for s in signal.source_event_ids}
+            sources = tuple(e for e in canonical if e.event_id in source_ids)
+            return DeepRequest(request_id, snapshot, cursor, observed, compaction, attention, sources)
 
     def apply_deep(self, request: DeepRequest, result: DeepResult, *,
                    compaction_error: str | None = None) -> DeepDecision:
@@ -295,27 +393,36 @@ class Journal:
             'compaction_error': compaction_error}).encode()).hexdigest()
         character = request.snapshot.state.character_id
         audit_id = 'deep_' + request.request_id
+        self.expire_attention(character)
         with self._transaction():
             previous = self.get(audit_id)
             if previous:
                 payload = previous.payload
                 if payload['fingerprint'] != fingerprint:
-                    raise EventConflict('Deep request ID conflict')
+                    legacy_request, legacy_result = asdict(request), asdict(result)
+                    legacy_request.pop('attention_context')
+                    legacy_request.pop('attention_sources')
+                    legacy_result.pop('attention')
+                    legacy = sha256(canonical_json({'request': legacy_request, 'result': legacy_result,
+                        'compaction_error': compaction_error}).encode()).hexdigest()
+                    if (result.schema_version != 1 or result.attention or request.attention_context
+                            or request.attention_sources or payload['fingerprint'] != legacy):
+                        raise EventConflict('Deep request ID conflict')
                 value = payload['decision']
                 return DeepDecision(value['request_id'], UpdateResult(**value['note']) if value['note'] else None,
                     CompactionResult(**value['compaction']) if value['compaction'] else None,
-                    value['acknowledged'], value['reason'])
-            if result.request_id != request.request_id or type(result.schema_version) is not int or result.schema_version != 1:
+                    value['acknowledged'], value['reason'], tuple(value.get('attention_signal_ids', ())))
+            if result.request_id != request.request_id or type(result.schema_version) is not int or result.schema_version != 2:
                 raise ValueError('Invalid Deep result envelope')
             if self.cursor(character) != request.cursor_from:
                 raise ValueError('Deep cursor conflict')
             reason = ''
             state = self.snapshot(character)
             epoch = self.context_epoch(character)
-            if result.note or result.compaction:
+            if result.note or result.compaction or result.attention:
                 if request.snapshot.state.revision != state.revision:
                     reason = 'revision_conflict'
-            if (result.note or result.compaction) and request.snapshot.epoch.version != epoch.version:
+            if (result.note or result.compaction or result.attention) and request.snapshot.epoch.version != epoch.version:
                 reason = reason or 'epoch_conflict'
             evidence = evidence_ids(request)
             if result.note:
@@ -336,6 +443,9 @@ class Journal:
                         or any(s not in evidence for i in p.items for s in i.source_event_ids)):
                     reason = reason or 'invalid_compaction_dependencies'
                 reason = reason or compaction_error or self._validate_compaction(p, epoch)
+            provenance = dict(self._db.execute('SELECT provenance_key, signal_id FROM attention_provenance WHERE character_id=?',
+                                               (character,)).fetchall())
+            attention_changes = prepare_attention(request, result, self._attention_all(character), self.get, self._clock(), provenance)
             note_result = compaction_result = None
             if reason:
                 if result.note:
@@ -353,10 +463,14 @@ class Journal:
                     compaction_result = self._apply_compaction(result.compaction)
                 if result.note:
                     note_result = self._apply_note(result.note)
+                for signal in attention_changes:
+                    self._store_attention(signal, request_id=request.request_id)
                 self._acknowledge(character, request.cursor_from, request.snapshot.through_sequence)
-            decision = DeepDecision(request.request_id, note_result, compaction_result, not reason, reason or 'applied')
+            ids = tuple(s.signal_id for s in attention_changes) if not reason else ()
+            decision = DeepDecision(request.request_id, note_result, compaction_result, not reason, reason or 'applied', ids)
             self._append(Event.create(character, 'deep.batch.completed' if not reason else 'deep.batch.rejected',
                 {'fingerprint': fingerprint, 'decision': asdict(decision),
+                 'attention_proposals': [asdict(p) for p in result.attention],
                  'cursor_from': request.cursor_from, 'through': request.snapshot.through_sequence}, event_id=audit_id))
             return decision
 

@@ -12,3 +12,8 @@ checks cover split control tokens, incomplete SSE and cancellation/closure;
 they do not replace real Nemotron conversations and fault checks.
 
 M2 checks closed/interleaved turn boundaries, batch rollback/replay, stale retry, off-loop SDK waits and confirmed cancellation. Separate actual Luna/Nemotron acceptance from injected delay/transport checks.
+
+M4.1 critical checks cover attention atomicity/deduplication, target CAS and foreign
+sources, additive v3 migration, legacy audit replay, restart/clock expiry, busy
+backlog and Fast independence. Use `scripts/verify_m4_1_attention.py --self-check`
+for fixture integrity; live semantic quality requires inspecting provider results.
