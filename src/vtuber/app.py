@@ -22,6 +22,7 @@ from vtuber.runtime.journal import Journal
 from vtuber.runtime.context_file import context_file_path
 from vtuber.runtime.orchestrator import Runtime
 from vtuber.contracts.trace import TraceSink
+from vtuber.contracts.deep import validate_initiative_timing
 
 
 @dataclass(frozen=True)
@@ -39,8 +40,14 @@ class Config:
     deep_backend: str = 'fake'
     omp: OMPSettings = field(default_factory=OMPSettings)
     working_context_tokens: int = 2048
+    initiative_enabled: bool = False
+    initiative_delay_seconds: float = 5.0
+    initiative_ttl_seconds: float = 120.0
+    initiative_cooldown_seconds: float = 60.0
 
     def __post_init__(self) -> None:
+        validate_initiative_timing(self.initiative_delay_seconds, self.initiative_ttl_seconds,
+                                   self.initiative_cooldown_seconds)
         if (type(self.working_context_tokens) is not int or not
                 0 < self.working_context_tokens < self.context_tokens - self.lmstudio.max_output_tokens - 32):
             raise ValueError("Working context budget must be positive and below the input allowance")
@@ -104,5 +111,8 @@ async def open_runtime(config: Config, output: OutputSink, *, trace: TraceSink |
         runtime = await stack.enter_async_context(Runtime(config.character_id, journal, fast,
             deep, output, deep_timeout=config.deep_timeout, deep_diagnostics=deep_diagnostics,
             fast_diagnostics=diagnostics, context_policy=compiler, trace=trace,
-            context_path=context_file_path(config.db, config.character_id)))
+            context_path=context_file_path(config.db, config.character_id),
+            initiative_enabled=config.initiative_enabled, initiative_delay_seconds=config.initiative_delay_seconds,
+            initiative_ttl_seconds=config.initiative_ttl_seconds,
+            initiative_cooldown_seconds=config.initiative_cooldown_seconds))
         yield runtime

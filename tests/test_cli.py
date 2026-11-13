@@ -23,9 +23,17 @@ class CLITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(runtime.context_policy.working_context_tokens, 1024)
                 with self.assertRaises(ContextBudgetExceeded):
                     runtime.context_policy.validate_working_context('x'*1025)
+                self.assertFalse(runtime.initiative_enabled)
+                request = runtime.journal.deep_request('primary', request_id='disabled')
+                self.assertIsNone(request)
         for invalid in (0, -1, True, 15840):
             with self.assertRaises(ValueError):
                 Config(working_context_tokens=invalid)
+        for changes in (dict(initiative_delay_seconds=True), dict(initiative_ttl_seconds=0),
+                        dict(initiative_delay_seconds=120), dict(initiative_cooldown_seconds=-1),
+                        dict(initiative_ttl_seconds=float('inf'))):
+            with self.assertRaises(ValueError):
+                Config(**changes)
 
     async def test_missing_omp_does_not_gate_fast(self):
         with tempfile.TemporaryDirectory() as folder:

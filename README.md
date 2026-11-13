@@ -218,3 +218,32 @@ does not magically recover missing prompts. Capture is bounded to 128 MiB per ru
 disk failure/limit stops capture visibly without deleting data or stopping chat.
 Trace persistence happens at request boundaries, not on every token. See
 [desktop implementation and verification](docs/DESKTOP_INSPECTOR.md).
+
+## Optional character initiative (M4.3)
+
+Autonomous speech is off by default. To let Luna occasionally propose a relevant
+line which Nemotron delivers through the ordinary Fast stream:
+
+```powershell
+python -m vtuber --fast-backend lmstudio --endpoint http://127.0.0.1:1230 --model liac-nemotron --deep-backend luna --enable-initiative
+```
+
+`--initiative-delay-seconds 5`, `--initiative-ttl-seconds 120` and
+`--initiative-cooldown-seconds 60` are configurable experimental defaults.
+Delay/TTL run from Luna request capture, so inference time counts toward both.
+Luna may provide proposal-specific delay/TTL. Require finite `0 <= delay < TTL`
+and nonnegative cooldown. Tune conversational rhythm from actual dialogue.
+
+Markdown remains the sole free-form working perspective. A separate bounded
+`speak` proposal carries intent, reason and canonical evidence. `none` preserves
+a pending intent; explicit `cancel` withdraws it. Runtime never interrupts Fast,
+gives new user input priority, and permits one attempt per real user anchor.
+An attempt is consumed even when its stream fails or is cancelled. Timers check
+existing opportunities and never call Luna. Restart cancels pending work instead
+of resuming speech. Completed autonomous speech is real assistant history; its
+input is `character.initiative.started`, never a fabricated user message.
+
+The desktop keeps initiative off; existing chat history displays completed
+autonomous speech as Fast. See [implementation and live evidence](docs/M4_3_IMPLEMENTATION.md).
+Opt-in acceptance: `python scripts/verify_m2_luna.py --phase initiative`; controlled
+cache probes: `python scripts/verify_m1_5_context.py --phase initiative-cache`.

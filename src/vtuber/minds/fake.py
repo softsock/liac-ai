@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from typing import AsyncGenerator
 
-from vtuber.contracts.events import UserMessage
+from vtuber.contracts.events import UserMessage, FastInput
 from vtuber.contracts.state import FastSnapshot, NoteProposal
 from vtuber.contracts.deep import DeepRequest, DeepResult
 
@@ -12,8 +12,9 @@ from vtuber.contracts.deep import DeepRequest, DeepResult
 class FakeFast:
     delay: float = 0.03
 
-    async def stream(self, snapshot: FastSnapshot, message: UserMessage) -> AsyncGenerator[str, None]:
-        text = (f"[r{snapshot.state.revision}] You said: {message.text} | "
+    async def stream(self, snapshot: FastSnapshot, message: FastInput) -> AsyncGenerator[str, None]:
+        origin = f'You said: {message.text}' if isinstance(message, UserMessage) else f'Character initiative: {message.intent}'
+        text = (f"[r{snapshot.state.revision}] {origin} | "
                 f"note: {snapshot.state.context_note or '(none)'}")
         for chunk in re.findall(r"\S+\s*", text):
             await asyncio.sleep(self.delay)

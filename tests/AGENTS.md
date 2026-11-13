@@ -17,3 +17,8 @@ M4.2 checks whole Markdown/clear/no-op, configured token rejection, stable tails
 legacy replay, late ordinary inputs, atomic file failure and startup repair.
 Use existing verifier Markdown phases for live behavior and backend cache counters;
 model no-op choice and suggestion adoption remain variable.
+
+M4.3 new regression work concentrates on atomic claim/replay, duplicate execution,
+expiry, race/user priority, cancellation and restart. Reuse parser/context/transport
+checks; live initiative/silence and Nemotron delivery are primary acceptance.
+Use existing verifier initiative phases; keep injected holds distinct from natural trials.

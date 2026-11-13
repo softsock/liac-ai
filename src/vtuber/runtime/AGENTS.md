@@ -26,3 +26,11 @@ Ordinary newer dialogue is not a conflict; revision/epoch CAS still applies.
 The serialized Deep worker writes context.md off-loop after changed commits and
 at startup; SQLite is authoritative. File failure preserves DB/cursor, exposes
 only the error class, and retries on the next change or restart. Close joins writes.
+
+M4.3 persists a single pending initiative in existing events. Atomic claim checks
+anchor, revision/epoch, prepared snapshot, expiry, cooldown and one-attempt guard;
+it consumes the proposal and appends character input plus reply.started together.
+New user input, explicit cancellation, shutdown and restart withdraw pending work.
+Readiness owns one cancellable task and never calls Deep. Autonomous-only tails
+remain unacknowledged for the next ordinary batch (or actual compaction), without
+self-triggered inference. None does not rearm deadlines or cancel a pending task.

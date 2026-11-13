@@ -13,7 +13,7 @@ import httpx
 
 from vtuber.context import ChatMessage, ContextCompiler
 from vtuber.minds.nemotron import CONTROL_MARKERS, render_nemotron
-from vtuber.contracts.events import UserMessage
+from vtuber.contracts.events import FastInput
 from vtuber.contracts.state import FastSnapshot
 from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
@@ -126,7 +126,7 @@ class LMStudioFast:
                 return
         raise ModelUnavailable("Load the selected model first; use --list-models to inspect identifiers")
 
-    async def stream(self, snapshot: FastSnapshot, message: UserMessage) -> AsyncGenerator[str, None]:
+    async def stream(self, snapshot: FastSnapshot, message: FastInput) -> AsyncGenerator[str, None]:
         start = perf_counter()
         metrics: dict[str, object] = {"turn_id": message.turn_id, "status": "streaming",
             "ttft_ms": None, "output_tokens": None, "prompt_tokens": None,

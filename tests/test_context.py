@@ -28,6 +28,13 @@ class ContextTests(unittest.TestCase):
         self.assertIn("history reply", prefix_before)
         self.assertIn("old note", before.messages[-2].content)
         self.assertIn("new note", after.messages[-2].content)
+        from vtuber.contracts.events import CharacterInitiative, utc_now
+        autonomous = compiler.compile(FastSnapshot(CharacterState('primary', 2, 'new note'), 2, history),
+            CharacterInitiative('Tease about the hat', 'Unfinished design', 'primary', 'auto', 'auto-turn', utc_now(), 'proposal'))
+        self.assertEqual(after.messages[:-2], autonomous.messages[:-2])
+        self.assertTrue(autonomous.messages[-2].content.endswith('new note'))
+        self.assertIn('character-origin', autonomous.messages[-1].content)
+        self.assertNotIn('Respond to the final user message', autonomous.messages[-2].content)
 
     def test_markdown_tail_and_configured_budget(self):
         compiler = ContextCompiler('Identity', token_counter=lambda ms: sum(len(m.content) for m in ms), working_context_tokens=1024)

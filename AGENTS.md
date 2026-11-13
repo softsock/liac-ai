@@ -4,7 +4,7 @@
 
 Code lives in `src/vtuber/`: `contracts/` defines immutable data and ports, `runtime/` owns SQLite and task lifecycle, and `minds/` contains fake/LM Studio adapters and `character.md`. `context.py` compiles model-independent messages. `app.py` wires dependencies; `cli.py` is the inspector. Critical checks live in `tests/`. Local data defaults to ignored `.data/`.
 
-Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Memory, behavior and external interfaces remain future milestones.
+Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Long-term memory, richer behavior and external interfaces remain future milestones.
 
 ## Build, Test, and Development Commands
 
@@ -48,3 +48,8 @@ M2 adds optional Luna via the pinned SDK-only vendor under `vendor/omp-rpc`. Ins
 
 M4.2 uses one Luna-managed Markdown context; see `docs/M4_2_IMPLEMENTATION.md`.
 SQLite remains authoritative; keep projections and runtime traces private.
+
+M4.3 adds opt-in event-backed initiative, not a scheduler or second memory.
+`none` preserves pending work; only explicit cancel or Runtime guards close it.
+Keep character-origin inputs distinct from user messages, share Fast's pipeline,
+and never let an autonomous-only tail trigger more Luna work. See `docs/M4_3_IMPLEMENTATION.md`.

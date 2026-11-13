@@ -181,6 +181,10 @@ def main() -> None:
     parser.add_argument("--model", default="", help="loaded instance ID from --list-models")
     parser.add_argument("--context-tokens", type=int, default=16384)
     parser.add_argument("--working-context-tokens", type=int, default=2048)
+    parser.add_argument('--enable-initiative', action='store_true', help='allow Luna to propose autonomous speech')
+    parser.add_argument('--initiative-delay-seconds', type=float, default=5.0)
+    parser.add_argument('--initiative-ttl-seconds', type=float, default=120.0)
+    parser.add_argument('--initiative-cooldown-seconds', type=float, default=60.0)
     parser.add_argument("--max-output-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -200,7 +204,10 @@ def main() -> None:
         config = Config(args.db, args.character, args.fast_delay, args.deep_delay, args.deep_timeout,
                         args.fast_backend, settings, args.context_tokens, args.identity, args.tokenizer,
                         args.deep_backend, OMPSettings(args.omp_executable, args.luna_model, args.luna_data),
-                        working_context_tokens=args.working_context_tokens)
+                        working_context_tokens=args.working_context_tokens, initiative_enabled=args.enable_initiative,
+                        initiative_delay_seconds=args.initiative_delay_seconds,
+                        initiative_ttl_seconds=args.initiative_ttl_seconds,
+                        initiative_cooldown_seconds=args.initiative_cooldown_seconds)
     except ValueError as error:
         parser.error(str(error))
     except (httpx.HTTPError, TimeoutError) as error:

@@ -82,6 +82,25 @@ class UserMessage:
                             occurred_at=self.occurred_at)
 
 
+@dataclass(frozen=True)
+class CharacterInitiative:
+    intent: str
+    reason: str
+    character_id: CharacterId
+    event_id: EventId
+    turn_id: TurnId
+    occurred_at: str
+    proposal_id: str
+
+    def as_event(self) -> Event:
+        return Event.create(self.character_id, 'character.initiative.started',
+            dict(intent=self.intent, reason=self.reason, proposal_id=self.proposal_id),
+            event_id=self.event_id, turn_id=self.turn_id, occurred_at=self.occurred_at)
+
+
+type FastInput = UserMessage | CharacterInitiative
+
+
 type OutputKind = Literal["reply.started", "reply.delta", "reply.completed",
                           "reply.cancelled", "reply.failed", "deep.completed", "deep.failed"]
 

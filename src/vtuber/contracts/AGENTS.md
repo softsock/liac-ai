@@ -13,3 +13,8 @@ without retaining partial speech. Future summary sources prove provenance only.
 M4.2 keeps legacy `context_note`/`note` names for the whole Markdown document.
 DeepRequest carries the configured token cap; null preserves, empty clears, and
 identical replacement is a no-op. Authority fields remain runtime-owned.
+
+M4.3 appends optional initiative fields and accepts v1/v2 Deep envelopes.
+`InitiativeProposal` carries bounded intent/reason/evidence; `InitiativeCancel`
+explicitly withdraws. Null/none preserves. `FastInput` distinguishes real user
+messages from `CharacterInitiative`; only completed speech becomes dialogue.

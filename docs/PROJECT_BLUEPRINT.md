@@ -575,6 +575,17 @@ Unit tests that write a known fact then search for it do not test memory quality
 
 ### 12.1 Character agency principles
 
+**DECIDED (M4.3, 2026-11-13):** Implement bounded opt-in initiative with one typed
+Luna opportunity, one Runtime readiness task and the existing Fast pipeline.
+Markdown remains the only working perspective. `none` preserves; explicit `cancel`
+withdraws. New user input wins. Runtime consumes an attempt atomically before
+speech, persists a distinct character input, and never calls Luna from a timer.
+Autonomous-only observations wait for the next ordinary batch or genuine compaction.
+Configurable delay/TTL/cooldown 5/120/60 seconds are **EXPERIMENT** starting values,
+not calibrated optima. Restart cancels pending work. Full beat machinery below,
+psychological scoring and long-term memory remain **FUTURE**.
+See [M4.3 implementation](M4_3_IMPLEMENTATION.md) for actual behavior and limits.
+
 The character should occasionally *want* something, not merely respond. Ideas must arise from past experiences, preferences, environment or ongoing intentions, not random timer-only text. An autonomous action can be silence, observation, expression change or asking a question. Avoid endless engagement optimization.
 
 ### 12.2 Beat types

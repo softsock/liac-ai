@@ -186,6 +186,54 @@ async def markdown_cache(evidence, trials: int):
                     **await raw_call(client, evidence, compiled.messages))
 
 
+async def initiative_cache(evidence, trials: int):
+    from vtuber.contracts.events import Event, CharacterInitiative, utc_now
+    from vtuber.contracts.state import CharacterState, FastSnapshot
+    async with http_client(evidence.settings) as client:
+        for trial in range(trials):
+            compiler = ContextCompiler(IDENTITY+f'\nInitiative cache {evidence.run_id} {trial}', token_counter=evidence.counter)
+            history = tuple(replace(Event.create('primary',
+                'user.message.completed' if i % 2 == 0 else 'character.reply.completed',
+                {'text': f'Record {i}: '+' '.join(VOCABULARY*14)}), sequence=i+1) for i in range(24))
+            snapshot = FastSnapshot(CharacterState('primary', 1, '# Interest\nThe unfinished blue save button.'), 24, history)
+            baseline = compiler.compile(snapshot, UserMessage('Say READY.'))
+            autonomous = compiler.compile(snapshot, CharacterInitiative('Tease about the swimming-pool save button.',
+                'An unfinished shared design joke.', 'primary', 'probe', 'probe-turn', utc_now(), 'probe-proposal'))
+            assert baseline.messages[:-2] == autonomous.messages[:-2]
+            # Isolate the final control input; production also changes the target wording in the Markdown wrapper.
+            final_only = (*baseline.messages[:-1], autonomous.messages[-1])
+            for case, messages in (('final_control', final_only), ('production_tail', autonomous.messages)):
+                evidence.save('initiative_cache', trial=trial, case=case, stage='prime',
+                    **await raw_call(client, evidence, baseline.messages))
+                evidence.save('initiative_cache', trial=trial, case=case, stage='changed',
+                    **await raw_call(client, evidence, messages))
+    from vtuber.minds.omp import OMPSettings
+    from verify_m2_luna import until
+    config = evidence.config(evidence.folder/'autonomous.db', deep_backend='luna', initiative_enabled=True,
+        deep_timeout=90, omp=OMPSettings(evidence.omp_executable, data_dir=evidence.folder/'omp', request_timeout=85))
+    offsets = {}
+    def output(item):
+        if item.kind == 'reply.started':
+            offsets[item.turn_id] = evidence.offset()
+    async with open_runtime(config, output) as runtime:
+        message = UserMessage("Skin Creator version 1 is still unreleased and I'm redesigning it again. "
+            "The save button is a swimming pool; maybe version 2 will arrive first.")
+        await (await runtime.submit(message))
+        await until(lambda: runtime.journal.cursor('primary') >= runtime.journal.get('reply_terminal_'+message.event_id).sequence
+                    or runtime.deep_error, 100)
+        await asyncio.sleep(7)
+        if runtime._fast_task:
+            await runtime._fast_task
+        starts = [e for e in runtime.journal.read('primary', limit=1000) if e.kind == 'character.initiative.started']
+        for start in starts:
+            terminal = runtime.journal.get('reply_terminal_'+start.event_id)
+            assert terminal.kind == 'character.reply.completed'
+            evidence.save('initiative_cache_actual', event_id=start.event_id, answer=terminal.payload['text'],
+                generation=dict(runtime.fast_diagnostics['generation']), **await evidence.timing(offsets[start.turn_id]))
+        if not starts:
+            evidence.save('initiative_cache_actual', autonomous_count=0, reason=runtime.deep_error or 'Luna chose silence')
+
+
 async def production(evidence, trials):
     for trial in range(trials):
         path = evidence.folder / f"trial-{trial}.sqlite3"
@@ -354,6 +402,8 @@ async def run(args, evidence):
         evidence.save("calibration", verified=True, tokenizer_sha256=evidence.counter.fingerprint)
     if args.phase == "markdown-cache":
         await markdown_cache(evidence, args.trials)
+    if args.phase == 'initiative-cache':
+        await initiative_cache(evidence, args.trials)
     if args.phase in ("all", "controls"):
         await controls(evidence, args.trials)
     if args.phase in ("all", "runtime"):
@@ -369,8 +419,9 @@ def main():
     parser.add_argument("--model", default="liac-nemotron")
     parser.add_argument("--tokenizer", type=Path, default=Path(".data/tokenizers/nemotron.json"))
     parser.add_argument("--output", type=Path, default=Path(".data/m1-5-results.jsonl"))
-    parser.add_argument("--phase", choices=("all", "controls", "runtime", "cli", "markdown-cache"), default="all")
+    parser.add_argument("--phase", choices=("all", "controls", "runtime", "cli", "markdown-cache", "initiative-cache"), default="all")
     parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument('--omp-executable', default='omp')
     args = parser.parse_args()
     if not args.output.resolve().is_relative_to(Path(".data").resolve()) or args.trials < 1:
         parser.error("Use an output under .data/ and at least one trial")
@@ -379,6 +430,7 @@ def main():
     assert counters(sample)["prompt_evaluated_tokens"] == 84
     assert counters(sample + sample)["prompt_evaluated_tokens"] is None
     evidence = Evidence(args)
+    evidence.omp_executable = args.omp_executable
     lms = shutil.which("lms")
     if lms is None:
         parser.error("lms CLI is required for runtime counters")
