@@ -825,13 +825,33 @@ Luna/OMP integration are outside this milestone.
 
 ### M2 – Background Luna/Context Patch [THIRD]
 
+**DECIDED (implemented M2):** Actual delivery is notes + semantic compaction via
+one OMP session; the original beat requirement below is deferred to M4.2. See
+[M2 report](M2_IMPLEMENTATION.md).
+
 Deliver: OMP RPC adapter, persistent `DeepInbox` cursor, asynchronous batch consumption, typed `context.note` and `performance.beat` proposals, validation and expiry, developer trace. **Exit:** Fast never waits for Luna, concrete beat reaches later Fast turn, all failure/replay scenarios T01–T06 pass.
 
 ### M3 – Memory benchmark and first persistence [AFTER M2]
 
+**DECIDED (M4.1):** Postponed by user choice; no Memory Store is introduced for attention.
+
 Deliver: Luna curator, source evidence ids, basic SQLite FTS retrieval, working+long-term context selection, inspection commands; compare candidate Hindsight separately. **Exit:** real multi-session holdout evaluation demonstrates measured improvement, no significant contamination/regression.
 
 ### M4 – Initiative/Character continuity [AFTER M3]
+
+**DECIDED (M4.1):** Proceed after M2 while M3 is postponed. Split M4 into:
+
+- M4.1 Attention Engine: source-backed notice/defer/ignore, Runtime lifecycle,
+  priority and inspection in the existing Deep worker. No new agent or Fast injection.
+- M4.2 Performance Beats [FUTURE]: use fresh noticed signals to prepare expressive
+  behavior; enforce current boundaries and eligibility again at execution time.
+- M4.3 Initiative & Continuity [FUTURE]: autonomous intent and optional speech.
+
+See [M4.1 implementation and evaluation](M4_1_IMPLEMENTATION.md). Semantic priority
+is known after Luna analysis; pending raw Journal batches remain chronological.
+Signals, sources, audit and acknowledgement survive restart; deferred work waits
+for conversational evidence rather than spinning on timers. Character interpretation
+is not verified fact. Deterministic lifecycle rules do not script the personality.
 
 Deliver: minimal interest/intention/activity lifecycle, cooldowns, one-shot beats and outcomes, autobiographical event integration, long-horizon evaluation. **Exit:** character revisits a shared event when appropriate and can remain silent; repetitive/irrelevant initiative bounded.
 

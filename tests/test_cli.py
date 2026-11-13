@@ -15,6 +15,39 @@ from vtuber.runtime.journal import Journal
 
 
 class CLITests(unittest.IsolatedAsyncioTestCase):
+    async def test_attention_inspection_and_foreign_source(self):
+        from vtuber.contracts.events import Event
+        from vtuber.contracts.deep import DeepResult
+        from vtuber.contracts.attention import AttentionProposal
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inspect.db'
+            journal = Journal(path)
+            try:
+                message = UserMessage('Please do not tease me.')
+                journal.append(message.as_event())
+                journal.append(Event.create('primary', 'character.reply.completed', {'text': 'Understood.'}, turn_id=message.turn_id))
+                foreign = journal.append(UserMessage('Private other character', 'other').as_event())
+                req = journal.deep_request('primary', request_id='inspect')
+                journal.apply_deep(req, DeepResult(2, 'inspect', attention=(AttentionProposal('boundary', 'high',
+                    'notice', 'Respect the user boundary.', (message.event_id,)),)))
+            finally:
+                journal.close()
+            async def lines():
+                for line in ('/attention noticed 10', '/attention-source ' + message.event_id,
+                             '/attention-source ' + foreign.event_id, '/attention nonsense',
+                             '/attention 101', '/quit'):
+                    yield line
+            capture = io.StringIO()
+            with patch('vtuber.cli.input_lines', lines), redirect_stdout(capture):
+                await run(Config(db=path))
+            text = capture.getvalue()
+            self.assertIn('Respect the user boundary.', text)
+            self.assertIn(message.event_id, text)
+            self.assertIn('Please do not tease me.', text)
+            self.assertNotIn('Private other character', text)
+            self.assertIn('Source not found for this character', text)
+            self.assertIn('Usage: /attention', text)
+
     async def test_missing_omp_does_not_gate_fast(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Config(db=Path(folder)/'test.db', fast_delay=0, deep_backend='luna',
