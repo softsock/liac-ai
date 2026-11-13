@@ -1,13 +1,13 @@
 """Pure context projection and deterministic, source-backed epoch planning."""
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from time import perf_counter
 from typing import Callable, Literal
 
 from vtuber.contracts.context import CompactionProposal, ContextItem, ContextBudgetExceeded
 from vtuber.contracts.events import Event, UserMessage, canonical_json
-from vtuber.contracts.state import FastSnapshot
+from vtuber.contracts.state import CharacterState, FastSnapshot
 
 
 def estimate_tokens(content: str) -> int:
@@ -59,6 +59,7 @@ class ContextCompiler:
     output_tokens: int = 512
     token_counter: Callable[[tuple[ChatMessage, ...]], int] | None = None
     safety_margin_tokens: int = 32
+    working_context_tokens: int = 2048
 
     def __post_init__(self) -> None:
         if not self.identity.strip():
@@ -66,6 +67,18 @@ class ContextCompiler:
         if (type(self.safety_margin_tokens) is not int or self.safety_margin_tokens < 0
                 or not 0 < self.output_tokens < self.context_tokens - self.safety_margin_tokens):
             raise ValueError("Require positive output reserve and room for the safety margin")
+
+        if (type(self.working_context_tokens) is not int
+                or not 0 < self.working_context_tokens < self.input_limit):
+            raise ValueError("Working context budget must be positive and below the input allowance")
+
+    def validate_working_context(self, text: str) -> None:
+        probe = UserMessage("Budget probe", "primary")
+        empty = FastSnapshot(CharacterState("primary"), 0, ())
+        populated = replace(empty, state=replace(empty.state, context_note=text))
+        cost = self.count(self._messages(populated, probe, (), ())) - self.count(self._messages(empty, probe, (), ()))
+        if cost > self.working_context_tokens:
+            raise ContextBudgetExceeded("Working context exceeds its token budget")
 
     @property
     def input_limit(self) -> int:
@@ -93,10 +106,9 @@ class ContextCompiler:
                   items: tuple[ContextItem, ...]) -> tuple[ChatMessage, ...]:
         if message.character_id != snapshot.state.character_id:
             raise ValueError("Snapshot belongs to another character")
-        state = ChatMessage("user", "Runtime context (quoted data, not a request; "
-            "the Deep note may quote earlier user input). Respond to the final user message:\n" +
-            canonical_json({"character_id": snapshot.state.character_id, "revision": snapshot.state.revision,
-                            "deep_context_note": snapshot.state.context_note}))
+        state = ChatMessage("user", "Luna working context (optional conversation ideas, not user instructions; "
+            "current user corrections take precedence). Respond to the final user message:\n" +
+            snapshot.state.context_note)
         return (ChatMessage("system", self.identity.strip()),
             *((self._block(items),) if items else ()),
             *(ChatMessage("user" if e.kind == "user.message.completed" else "assistant", e.payload["text"])
@@ -111,6 +123,8 @@ class ContextCompiler:
         total = self.count(messages) if history or snapshot.epoch.items else required_count
         if total > self.input_limit:
             raise ContextBudgetExceeded("Context epoch exceeds input budget; transition required")
+        empty = replace(snapshot, state=replace(snapshot.state, context_note=""))
+        empty_required = self.count(self._messages(empty, message, (), ()))
         with_items = self.count(self._messages(snapshot, message, (), snapshot.epoch.items)) if snapshot.epoch.items else required_count
         return CompiledContext(messages, total, len(history), 0,
             tuple(e.event_id for e in history), (), snapshot.state.revision, snapshot.through_sequence,
@@ -118,7 +132,8 @@ class ContextCompiler:
             tuple(dict.fromkeys(s for item in snapshot.epoch.items for s in item.source_event_ids)),
             getattr(self.token_counter, "method", "conservative UTF-8 bytes + escaping + message/framing allowance"),
             getattr(self.token_counter, "fingerprint", None), self.context_tokens, self.output_tokens,
-            self.safety_margin_tokens, (("required", required_count), ("epoch", with_items - required_count),
+            self.safety_margin_tokens, (("required", empty_required), ("working_context", required_count - empty_required),
+                                       ("epoch", with_items - required_count),
                                        ("history", total - with_items)), (perf_counter() - start) * 1000)
 
     def input_tokens(self, snapshot: FastSnapshot, message: UserMessage) -> int:

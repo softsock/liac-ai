@@ -1,4 +1,4 @@
-"""The sole M0 state operation: replace one context note at an exact revision."""
+"""Replace the Markdown working context at an exact revision."""
 
 from dataclasses import replace
 
@@ -14,4 +14,6 @@ def reduce_note(state: CharacterState, proposal: NoteProposal) -> CharacterState
         raise ValueError("Proposal belongs to another character")
     if state.revision != proposal.based_on_revision:
         raise RevisionConflict("revision_conflict")
+    if state.context_note == proposal.note:
+        return state
     return replace(state, revision=state.revision + 1, context_note=proposal.note)

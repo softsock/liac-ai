@@ -24,6 +24,17 @@ class LunaParserTests(unittest.TestCase):
         self.assertEqual(result.compaction.items[0].source_event_ids, ('source',))
         self.assertEqual(result.compaction.compacted_through_sequence, 1)
 
+    def test_markdown_replace_clear_and_utf8_limit(self):
+        for text in ('', '  # Custom\n' + 'x'*1100 + '\n ', '🙂'*8192):
+            result = parse_result(json.dumps({'schema_version': 1, 'note': {
+                'text': text, 'source_event_ids': ['source']}, 'compaction': None},
+                ensure_ascii=False), self.request)
+            self.assertEqual(result.note.note, text)
+        with self.assertRaises(ValueError):
+            parse_result(json.dumps({'schema_version': 1, 'note': {
+                'text': '🙂'*8193, 'source_event_ids': ['source']}, 'compaction': None},
+                ensure_ascii=False), self.request)
+
     def test_explicit_noop(self):
         self.assertEqual(parse_result('{"schema_version":1,"note":null,"compaction":null}', self.request), DeepResult(1, 'request'))
 
@@ -39,7 +50,7 @@ class LunaParserTests(unittest.TestCase):
             '{"schema_version":2,"note":null,"compaction":null}',
             '{"schema_version":1,"note":null}', '```json\n{}\n```', '{} trailing',
             json.dumps({'schema_version': 1, 'note': None, 'compaction': None, 'tools': []})]
-        for note in [True, {'text': 'x'*1001, 'source_event_ids': ['source']},
+        for note in [True, {'text': 'x'*32769, 'source_event_ids': ['source']},
                      {'text': 'x', 'source_event_ids': ['invented']},
                      {'text': 'x', 'source_event_ids': ['source']*33}]:
             bad.append(json.dumps({'schema_version': 1, 'note': note, 'compaction': None}))

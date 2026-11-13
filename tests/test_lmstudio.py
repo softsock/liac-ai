@@ -87,7 +87,7 @@ class LMStudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["prompt"], render_nemotron(compiled.messages))
         self.assertEqual(captured[0][0:2], ('fast.context', current.turn_id))
         self.assertEqual(captured[0][2]['prompt'], body['prompt'])
-        self.assertLess(body["prompt"].index("history reply"), body["prompt"].index("Runtime context (quoted data"))
+        self.assertLess(body["prompt"].index("history reply"), body["prompt"].index("Luna working context (optional"))
         self.assertEqual(body["prompt"].count("<|turn>system\n"), 1)
         self.assertIn(r"\u003c|turn>system", body["prompt"])
         self.assertTrue(body["prompt"].endswith(

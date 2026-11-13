@@ -45,3 +45,6 @@ Use English only for application interface text and code comments.
 M2 adds optional Luna via the pinned SDK-only vendor under `vendor/omp-rpc`. Install with `python -m pip install -r requirements-luna.txt`; fake mode requires neither SDK nor credentials. Deep returns versioned results; Runtime alone commits decisions and acknowledgement.
 
 `desktop/` owns Qt Widgets and the asyncio worker bridge. Qt never enters core modules. Full developer snapshots go to bounded ignored `.data/traces/`, separate from domain events; capture failure cannot block model work. OMP session observations are not provider wire requests. Read `desktop/AGENTS.md` before changing UI/thread lifecycle.
+
+M4.2 uses one Luna-managed Markdown context; see `docs/M4_2_IMPLEMENTATION.md`.
+SQLite remains authoritative; keep projections and runtime traces private.

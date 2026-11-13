@@ -4,6 +4,7 @@ import asyncio
 import logging
 from contextlib import aclosing, suppress
 from time import perf_counter
+from pathlib import Path
 from dataclasses import asdict
 from typing import Literal
 
@@ -26,7 +27,8 @@ class Runtime:
                  output: OutputSink, *, deep_timeout: float = 30.0,
                  fast_diagnostics: dict[str, object] | None = None,
                  deep_diagnostics: dict[str, object] | None = None,
-                 context_policy: ContextPolicy | None = None, trace: TraceSink | None = None) -> None:
+                 context_policy: ContextPolicy | None = None, trace: TraceSink | None = None,
+                 context_path: Path | None = None) -> None:
         self.character_id = character_id
         self.journal = journal
         self.fast = fast
@@ -39,7 +41,8 @@ class Runtime:
         self.last_cancellation_ms: float | None = None
         self.deep_diagnostics = deep_diagnostics if deep_diagnostics is not None else {}
         self._deep_worker = DeepWorker(character_id, journal, deep, self._emit,
-            timeout=deep_timeout, context_policy=context_policy, diagnostics=self.deep_diagnostics, trace=trace)
+            timeout=deep_timeout, context_policy=context_policy, diagnostics=self.deep_diagnostics, trace=trace,
+            context_path=context_path)
         self._input_lock = asyncio.Lock()
         self._fast_task: asyncio.Task[None] | None = None
         self._current: tuple[UserMessage, FastSnapshot] | None = None

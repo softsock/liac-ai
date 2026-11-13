@@ -239,7 +239,8 @@ class Journal:
         return row[0] if row else 0
 
     def deep_request(self, character_id: str, *, request_id: str,
-                     max_events: int = 100, compact: bool = False) -> DeepRequest | None:
+                     max_events: int = 100, compact: bool = False,
+                     working_context_tokens: int = 2048) -> DeepRequest | None:
         if max_events < 1 or not request_id.strip():
             raise ValueError('Invalid Deep request')
         with self._transaction():
@@ -287,12 +288,19 @@ class Journal:
                 tuple((e.turn_id, e.sequence) for e in terminals if e.sequence > epoch.compacted_through_sequence))
             # Audit records are decisions, not new observations for the model.
             observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.')))
-            return DeepRequest(request_id, snapshot, cursor, observed, compaction)
+            return DeepRequest(request_id, snapshot, cursor, observed, compaction, working_context_tokens)
 
     def apply_deep(self, request: DeepRequest, result: DeepResult, *,
-                   compaction_error: str | None = None) -> DeepDecision:
-        fingerprint = sha256(canonical_json({'request': asdict(request), 'result': asdict(result),
-            'compaction_error': compaction_error}).encode()).hexdigest()
+                   compaction_error: str | None = None, context_error: str | None = None) -> DeepDecision:
+        request_data = asdict(request)
+        # Default omission preserves fingerprints of pre-Markdown schema-v1 batches.
+        if request.working_context_tokens == 2048:
+            del request_data['working_context_tokens']
+        fingerprint_data = {'request': request_data, 'result': asdict(result),
+                            'compaction_error': compaction_error}
+        if context_error is not None:
+            fingerprint_data['context_error'] = context_error
+        fingerprint = sha256(canonical_json(fingerprint_data).encode()).hexdigest()
         character = request.snapshot.state.character_id
         audit_id = 'deep_' + request.request_id
         with self._transaction():
@@ -325,7 +333,7 @@ class Journal:
                         or p.observed_through_sequence != request.snapshot.through_sequence
                         or not set(p.source_event_ids) <= evidence):
                     reason = reason or 'invalid_note_dependencies'
-                reason = reason or self._validate_proposal(p)
+                reason = reason or context_error or self._validate_proposal(p)
             if result.compaction:
                 p = result.compaction
                 if (request.compaction is None or p.proposal_id != request.request_id+':epoch'
@@ -397,10 +405,11 @@ class Journal:
         accepted = not reason
         self._db.execute("INSERT OR IGNORE INTO character_state(character_id) VALUES (?)",
                          (proposal.character_id,))
-        if accepted:
+        unchanged = accepted and state.revision == proposal.based_on_revision
+        if accepted and not unchanged:
             self._db.execute("UPDATE character_state SET revision=?, context_note=? WHERE character_id=?",
                              (state.revision, state.context_note, state.character_id))
-        result = UpdateResult(accepted, state.revision, reason or "applied")
+        result = UpdateResult(accepted, state.revision, reason or ("no_change" if unchanged else "applied"))
         self._append(Event.create(proposal.character_id,
             "state.patch.applied" if accepted else "state.patch.rejected",
             {"proposal": encoded, **asdict(result)}, event_id=audit_id,
@@ -412,7 +421,7 @@ class Journal:
     def _validate_proposal(self, proposal: NoteProposal) -> str:
         if not isinstance(proposal.proposal_id, str) or not proposal.proposal_id.strip():
             return "invalid_proposal_id"
-        if not isinstance(proposal.note, str) or not 1 <= len(proposal.note.strip()) <= 1000:
+        if not isinstance(proposal.note, str) or len(proposal.note.encode("utf-8")) > 32768:
             return "invalid_note"
         if type(proposal.based_on_revision) is not int or proposal.based_on_revision < 0:
             return "invalid_revision"

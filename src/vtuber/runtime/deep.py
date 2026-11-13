@@ -2,12 +2,14 @@
 import asyncio
 from dataclasses import asdict
 from time import perf_counter
+from pathlib import Path
 
 from vtuber.contracts.context import ContextBudgetExceeded
 from vtuber.contracts.deep import DeepUnavailable
 from vtuber.contracts.events import RuntimeOutput, UserMessage, new_id
 from vtuber.contracts.protocols import ContextPolicy, DeepMind, OutputSink
 from vtuber.runtime.journal import Journal
+from vtuber.runtime.context_file import write_context
 from vtuber.contracts.trace import TraceSink, emit_trace, trace_enabled
 
 
@@ -18,11 +20,12 @@ async def retry_delay(seconds: float) -> None:
 class DeepWorker:
     def __init__(self, character_id: str, journal: Journal, mind: DeepMind, output: OutputSink,
                  *, timeout: float, context_policy: ContextPolicy | None, diagnostics: dict[str, object],
-                 trace: TraceSink | None = None) -> None:
+                 trace: TraceSink | None = None, context_path: Path | None = None) -> None:
         self.character_id, self.journal, self.mind, self.output = character_id, journal, mind, output
         self.timeout, self.context_policy, self.diagnostics = timeout, context_policy, diagnostics
         self.error: str | None = None
         self.trace = trace
+        self.context_path = context_path
         self._wake = asyncio.Event()
         self._retry = asyncio.Event()
         self._task = None
@@ -67,7 +70,33 @@ class DeepWorker:
             event_id=latest.event_id, turn_id=latest.turn_id)
         return self.context_policy.input_tokens(snapshot, message) >= self.context_policy.input_limit*3//4
 
+    async def _refresh_context(self) -> None:
+        if self.context_path is None:
+            return
+        text = self.journal.snapshot(self.character_id).context_note
+        write = asyncio.create_task(asyncio.to_thread(write_context, self.context_path, text))
+        try:
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # A replacement Runtime must never race an abandoned file write.
+                while not write.done():
+                    try:
+                        await asyncio.shield(write)
+                    except asyncio.CancelledError:
+                        continue
+                    except OSError:
+                        break
+                raise
+            self.diagnostics['context_export_error'] = None
+        except OSError as error:
+            self.diagnostics['context_export_error'] = type(error).__name__
+        finally:
+            if write.done() and not write.cancelled():
+                write.exception()
+
     async def _run(self):
+        await self._refresh_context()
         while not self._stopping:
             await self._wake.wait()
             self._wake.clear()
@@ -78,7 +107,8 @@ class DeepWorker:
                 revision = self.journal.snapshot(self.character_id).revision
                 try:
                     pressure = self._compact or self._pressure()
-                    request = self.journal.deep_request(self.character_id, request_id=new_id('deep'), compact=pressure)
+                    request = self.journal.deep_request(self.character_id, request_id=new_id('deep'), compact=pressure,
+                        working_context_tokens=self.context_policy.working_context_tokens if self.context_policy else 2048)
                     self._compact = False
                     if request is None:
                         break
@@ -103,9 +133,15 @@ class DeepWorker:
                             self.context_policy.validate_compaction(self.journal.fast_snapshot(self.character_id), result.compaction)
                         except ContextBudgetExceeded:
                             budget_error = 'context_budget_exceeded'
+                    context_error = None
+                    if result.note and self.context_policy:
+                        try:
+                            self.context_policy.validate_working_context(result.note.note)
+                        except ContextBudgetExceeded:
+                            context_error = 'working_context_budget_exceeded'
                     start = perf_counter()
                     before = self.journal.fast_snapshot(self.character_id) if trace_enabled(self.trace) else None
-                    decision = self.journal.apply_deep(request, result, compaction_error=budget_error)
+                    decision = self.journal.apply_deep(request, result, compaction_error=budget_error, context_error=context_error)
                     self.diagnostics.update(commit_ms=round((perf_counter()-start)*1000, 3),
                         decision=decision.reason, acknowledged=decision.acknowledged)
                     if trace_enabled(self.trace):
@@ -114,6 +150,8 @@ class DeepWorker:
                                    after=asdict(self.journal.fast_snapshot(self.character_id)), metrics=self.diagnostics)
                     if not decision.acknowledged:
                         raise ValueError(decision.reason)
+                    if decision.note and decision.note.reason == 'applied':
+                        await self._refresh_context()
                     current = self.journal.snapshot(self.character_id)
                     self._attempted = (self.journal.context_epoch(self.character_id).version,
                         current.revision, request.compaction.cutoff if request.compaction else None)

@@ -23,6 +23,7 @@ class DeepRequest:
     cursor_from: int
     events: tuple[Event, ...]
     compaction: CompactionInput | None = None
+    working_context_tokens: int = 2048
 
 
 @dataclass(frozen=True)

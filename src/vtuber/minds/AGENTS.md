@@ -20,3 +20,7 @@ Optional traces capture actual rendered Fast prompts, Luna request/response and
 text-visible OMP session context. Never recompile a newer snapshot for a historical
 trace, capture auth headers or call a session view the exact provider request.
 Opaque signatures, provider payloads and reasoning content are omitted.
+
+M4.2 parses Markdown as one schema-v1 note text field (32768 UTF-8 bytes).
+Luna receives a configured token budget; sections and almost-ready lines are
+optional. Preserve whitespace/empty clears; user corrections outrank old ideas.

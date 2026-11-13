@@ -20,3 +20,9 @@ without rebasing. Read state/epoch/watermark/exact history in one short transact
 M2 `deep.py` owns one serialized observer, complete-turn batches and bounded retry. `apply_deep` commits all operation decisions plus cursor together; stale dependencies retain input for reconsideration. Audit-only tails never become model work. No-op compaction is coalesced by epoch/revision/cutoff.
 
 Notes and compaction both depend on the captured epoch. Startup cancels every accepted input without a terminal, including inputs persisted before reply.started. Worker stop prevents post-close application even when an adapter swallows cancellation.
+
+M4.2 validates the document token budget before the atomic Deep batch commit.
+Ordinary newer dialogue is not a conflict; revision/epoch CAS still applies.
+The serialized Deep worker writes context.md off-loop after changed commits and
+at startup; SQLite is authoritative. File failure preserves DB/cursor, exposes
+only the error class, and retries on the next change or restart. Close joins writes.

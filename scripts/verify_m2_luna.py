@@ -23,6 +23,7 @@ def timings(start, first, finish, adapter):
 def self_check():
     assert timings(1, 1.5, 2, 42) == {'submit_first_ms': 500, 'wall_ms': 1000, 'adapter_ttft_ms': 42}
     assert timings(1, None, 2, None)['submit_first_ms'] is None
+    assert callable(markdown_context)
     print('measurement self-check PASS')
 
 
@@ -219,10 +220,87 @@ async def cli(evidence):
             await reader
 
 
+async def markdown_context(evidence):
+    from vtuber.runtime.context_file import context_file_path
+    for budget in (1024, 2048):
+        config = evidence.config(f'markdown-{budget}', working_context_tokens=budget)
+        decisions = []
+        def trace(kind, request_id, data):
+            if kind == 'deep.decision':
+                decisions.append(data)
+        async with open_runtime(config, evidence.output, trace=trace) as runtime:
+            async def settled(terminal):
+                await until(lambda: runtime.journal.cursor('primary') >= terminal
+                    or runtime.deep_diagnostics.get('degraded'))
+                assert runtime.journal.cursor('primary') >= terminal, runtime.deep_diagnostics
+            answer, terminal, _ = await evidence.send(runtime,
+                "I'm making Skin Creator. I've redesigned its vintage interface three times before releasing version 1. "
+                "I enjoy a little playful teasing about my endless redesigns. Keep replies short.", budget=budget)
+            await settled(terminal)
+            evidence.save('markdown_document', budget=budget, stage='earned_idea',
+                document=runtime.journal.snapshot('primary').context_note, answer=answer)
+            answer, terminal, _ = await evidence.send(runtime,
+                "Guess what, I'm tempted to redesign Skin Creator again. What do you think?", budget=budget)
+            await settled(terminal)
+            evidence.save('markdown_document', budget=budget, stage='influence',
+                document=runtime.journal.snapshot('primary').context_note, answer=answer)
+            real, ready, release = runtime.deep, asyncio.Event(), asyncio.Event()
+            correction_pending, correction_release = asyncio.Event(), asyncio.Event()
+            class Held:
+                once = True
+                async def propose(self, request):
+                    if not self.once:
+                        correction_pending.set()
+                        await correction_release.wait()
+                    result = await real.propose(request)
+                    if self.once:
+                        self.once = False
+                        ready.set()
+                        await release.wait()
+                    return result
+            runtime._deep_worker.mind = Held()
+            try:
+                await evidence.send(runtime, "Maybe Skin Creator 2 will arrive before version 1. Another redesign!", budget=budget)
+                await asyncio.wait_for(ready.wait(), 90)
+                answer, terminal, _ = await evidence.send(runtime,
+                    "Stop teasing me about redesigns. Drop that joke. I've frozen the layout and moved to keyboard "
+                    "accessibility testing. Please talk seriously about the testing now.", budget=budget, injected_hold=True)
+                release.set()
+                await asyncio.wait_for(correction_pending.wait(), 10)
+                stale = runtime.journal.snapshot('primary').context_note
+                answer, terminal, _ = await evidence.send(runtime,
+                    "How should I check the keyboard navigation? Keep it brief.", budget=budget,
+                    stale_document_after_correction=True)
+                evidence.save('markdown_document', budget=budget, stage='late_context_behavior',
+                    document=stale, answer=answer, injected_hold=True)
+                correction_release.set()
+                await settled(terminal)
+            finally:
+                release.set()
+                correction_release.set()
+            evidence.save('markdown_document', budget=budget, stage='correction_after_held_result',
+                document=runtime.journal.snapshot('primary').context_note, answer=answer,
+                decisions=decisions, injected_hold=True)
+            before = runtime.journal.snapshot('primary')
+            _, terminal, _ = await evidence.send(runtime, 'Okay.', budget=budget)
+            await settled(terminal)
+            state = runtime.journal.snapshot('primary')
+            evidence.save('markdown_noop', budget=budget, unchanged=state == before,
+                document=state.context_note)
+            assert runtime.journal._db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        path = context_file_path(config.db, 'primary')
+        path.write_text('stale projection', encoding='utf-8')
+        async with open_runtime(config, evidence.output) as runtime:
+            await until(lambda: path.read_bytes() == state.context_note.encode('utf-8'))
+            assert runtime.journal.snapshot('primary') == state
+            evidence.save('markdown_restart', budget=budget, recovered=True, revision=state.revision)
+
+
 async def main(args):
     evidence=Evidence(args)
     if args.phase in ('all','long'):await long_conversation(evidence)
     if args.phase in ('all','scenarios'):await scenarios(evidence)
+    if args.phase == 'markdown':await markdown_context(evidence)
     if args.phase == 'offline':await offline(evidence)
     if args.phase in ('all','cli'):await cli(evidence)
 
@@ -236,7 +314,7 @@ if __name__=='__main__':
     parser.add_argument('--omp-executable',default='omp')
     parser.add_argument('--luna-model',default='openai-codex/gpt-6-luna')
     parser.add_argument('--output',type=Path,default=Path('.data/m2-results.jsonl'))
-    parser.add_argument('--phase',choices=('all','long','scenarios','offline','cli'),default='all')
+    parser.add_argument('--phase',choices=('all','long','scenarios','offline','cli','markdown'),default='all')
     parser.add_argument('--trials',type=int,default=3)
     arguments=parser.parse_args()
     if arguments.self_check:self_check()

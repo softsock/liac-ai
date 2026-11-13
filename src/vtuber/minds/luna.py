@@ -60,9 +60,12 @@ def parse_result(text: str, request: DeepRequest) -> DeepResult:
     note = None
     if data['note'] is not None:
         value = _object(data['note'], {'text', 'source_event_ids'})
+        text = value['text']
+        if not isinstance(text, str) or len(text.encode('utf-8')) > 32768:
+            raise ValueError('Invalid working context')
         note = NoteProposal(request.request_id + ':note', snapshot.state.character_id,
             snapshot.state.revision, snapshot.through_sequence,
-            _sources(value['source_event_ids'], evidence), _text(value['text'], 1000))
+            _sources(value['source_event_ids'], evidence), text)
     compaction = None
     if data['compaction'] is not None:
         if request.compaction is None:

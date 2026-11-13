@@ -156,6 +156,36 @@ def turn_text(index):
     return facts.get(index, f"Fictional garden record {index}.") + "\nQuoted filler: " + filler + "\n" + question
 
 
+async def markdown_cache(evidence, trials: int):
+    from vtuber.contracts.context import ContextEpoch
+    from vtuber.contracts.events import Event
+    from vtuber.contracts.state import CharacterState, FastSnapshot
+    async with http_client(evidence.settings) as client:
+        for trial in range(trials):
+            marker = f"Markdown cache {evidence.run_id} trial {trial}"
+            compiler = ContextCompiler(IDENTITY + "\n" + marker, token_counter=evidence.counter)
+            history = tuple(replace(Event.create('primary',
+                'user.message.completed' if i % 2 == 0 else 'character.reply.completed',
+                {'text': f'Record {i}: ' + ' '.join(VOCABULARY*14)}), sequence=i+1) for i in range(24))
+            snapshot = FastSnapshot(CharacterState('primary', 1, '# Current\nTesting the blue bridge.'),
+                24, history, ContextEpoch(1, 0, (ContextItem('A quiet garden.', ('source',), 'summary'),)))
+            current = UserMessage('Say READY.')
+            variants = {
+                'markdown_tail': replace(snapshot, state=replace(snapshot.state,
+                    revision=2, context_note='# Current\nTesting the green bridge.')),
+                'epoch_switch': replace(snapshot, epoch=ContextEpoch(2, 0,
+                    (ContextItem('A lively garden.', ('source',), 'summary'),)))}
+            baseline = compiler.compile(snapshot, current)
+            for case, changed in variants.items():
+                # Prime the identical baseline separately; never compare different histories.
+                evidence.save('markdown_cache', trial=trial, case=case, stage='prime',
+                    **await raw_call(client, evidence, baseline.messages))
+                compiled = compiler.compile(changed, current)
+                evidence.save('markdown_cache', trial=trial, case=case, stage='changed',
+                    stable_prefix_unchanged=baseline.messages[:-2] == compiled.messages[:-2],
+                    **await raw_call(client, evidence, compiled.messages))
+
+
 async def production(evidence, trials):
     for trial in range(trials):
         path = evidence.folder / f"trial-{trial}.sqlite3"
@@ -322,6 +352,8 @@ async def run(args, evidence):
         fast = LMStudioFast(client, ContextCompiler(IDENTITY, token_counter=evidence.counter), evidence.settings, {})
         await fast.verify_token_count()
         evidence.save("calibration", verified=True, tokenizer_sha256=evidence.counter.fingerprint)
+    if args.phase == "markdown-cache":
+        await markdown_cache(evidence, args.trials)
     if args.phase in ("all", "controls"):
         await controls(evidence, args.trials)
     if args.phase in ("all", "runtime"):
@@ -337,7 +369,7 @@ def main():
     parser.add_argument("--model", default="liac-nemotron")
     parser.add_argument("--tokenizer", type=Path, default=Path(".data/tokenizers/nemotron.json"))
     parser.add_argument("--output", type=Path, default=Path(".data/m1-5-results.jsonl"))
-    parser.add_argument("--phase", choices=("all", "controls", "runtime", "cli"), default="all")
+    parser.add_argument("--phase", choices=("all", "controls", "runtime", "cli", "markdown-cache"), default="all")
     parser.add_argument("--trials", type=int, default=3)
     args = parser.parse_args()
     if not args.output.resolve().is_relative_to(Path(".data").resolve()) or args.trials < 1:

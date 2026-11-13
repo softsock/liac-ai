@@ -12,3 +12,8 @@ checks cover split control tokens, incomplete SSE and cancellation/closure;
 they do not replace real Nemotron conversations and fault checks.
 
 M2 checks closed/interleaved turn boundaries, batch rollback/replay, stale retry, off-loop SDK waits and confirmed cancellation. Separate actual Luna/Nemotron acceptance from injected delay/transport checks.
+
+M4.2 checks whole Markdown/clear/no-op, configured token rejection, stable tails,
+legacy replay, late ordinary inputs, atomic file failure and startup repair.
+Use existing verifier Markdown phases for live behavior and backend cache counters;
+model no-op choice and suggestion adoption remain variable.
