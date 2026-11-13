@@ -1,5 +1,10 @@
 # Desktop runtime inspector
 
+M4.4 source update: this inspector now acts as Conversation Lab with an independent
+simulated-user client, bounded asynchronous capture, historical context inspection
+and archived transcript replay. See [M4.4 architecture and current evidence](M4_4_CONVERSATION_LAB.md).
+The executable described below remains the earlier build.
+
 Implemented on `codex/desktop-inspector` from M2 `fc20df6`, 2026-11-13.
 
 ## Behavior

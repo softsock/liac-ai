@@ -81,6 +81,37 @@ class BridgeTests(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
+    def test_paged_model_and_stale_detail_completion(self):
+        from vtuber.desktop.window import MainWindow
+        window = MainWindow()
+        rows = [dict(turn_id=str(i),role='user',origin='simulated',text=str(i)) for i in range(10000)]
+        window.chat.conversation.reset(rows)
+        self.assertEqual(window.chat.conversation.rowCount(),1000)
+        window.chat.conversation.reset(rows[:200])
+        self.assertEqual(window.chat.conversation.rows[0]['text'],'0')
+        window.reader.token = 9
+        window.raw.setPlainText('current selection')
+        window._loaded(8,{'records':[]},'stale failure')
+        self.assertEqual(window.raw.toPlainText(),'current selection')
+        window.close()
+
+    def test_lab_controls_and_replay_origin(self):
+        from vtuber.desktop.window import MainWindow
+        from vtuber.tracing import TraceRecorder
+        with tempfile.TemporaryDirectory() as folder:
+            trace = TraceRecorder(Path(folder))
+            trace('conversation.input','t',{'text':'hello','origin':'simulated','session':2})
+            trace('fast.started','t',{'message':{'text':'hello','turn_id':'t'}})
+            trace('fast.finished','t',{'text':'hi','status':'completed'})
+            window = MainWindow(root=Path(folder))
+            window.show()
+            self.assertFalse(window.initiative.isChecked())
+            window.load_history(trace.path)
+            until(lambda: 'hello' in window.chat.toPlainText())
+            self.assertIn('Simulated user',window.chat.toPlainText())
+            self.assertIsNone(window.worker)
+            window.close()
+
     def test_luna_response_retains_parsing_failure(self):
         from vtuber.desktop.window import MainWindow
         with tempfile.TemporaryDirectory() as folder:

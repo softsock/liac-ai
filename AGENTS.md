@@ -53,3 +53,8 @@ M4.3 adds opt-in event-backed initiative, not a scheduler or second memory.
 `none` preserves pending work; only explicit cancel or Runtime guards close it.
 Keep character-origin inputs distinct from user messages, share Fast's pipeline,
 and never let an autonomous-only tail trigger more Luna work. See `docs/M4_3_IMPLEMENTATION.md`.
+
+M4.4 source Conversation Lab adds isolated simulation runs and read-only replay.
+`lab/` owns research clients, not cognition; read its AGENTS before changes.
+Full long-provider acceptance is currently deferred by the user. See
+`docs/M4_4_CONVERSATION_LAB.md`; the old bundled executable predates M4.4.

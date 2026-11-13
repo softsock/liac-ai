@@ -67,6 +67,8 @@ class Runtime:
     async def start(self) -> None:
         if self._started or self._stopping:
             raise RuntimeError("Runtime cannot be started twice")
+        emit_trace(self.trace, 'runtime.lifecycle', self.character_id, phase='recovering',
+                   snapshot=asdict(self.journal.fast_snapshot(self.character_id)))
         self._withdraw_initiative('process_restarted')
         for message in self.journal.unfinished_inputs(self.character_id):
             started = self.journal.get(f'reply_started_{message.event_id}')
@@ -78,6 +80,8 @@ class Runtime:
                 turn_id=message.turn_id, causation_id=message.event_id))
         self._started = True
         self._deep_worker.start()
+        emit_trace(self.trace, 'runtime.lifecycle', self.character_id, phase='started',
+                   snapshot=asdict(self.journal.fast_snapshot(self.character_id)))
 
     def _emit(self, output: RuntimeOutput) -> None:
         try:
@@ -149,7 +153,8 @@ class Runtime:
         self._current = message, snapshot
         if trace_enabled(self.trace):
             emit_trace(self.trace, 'fast.started', message.turn_id,
-                       message=asdict(message), snapshot=asdict(snapshot))
+                       message=asdict(message), snapshot=asdict(snapshot),
+                       reason='initiative' if isinstance(message,CharacterInitiative) else 'user_message')
         if error is not None:
             self.fast_diagnostics.pop("context", None)
             self.fast_diagnostics["generation"] = {"turn_id": message.turn_id, "status": "failed",
@@ -173,6 +178,8 @@ class Runtime:
                 and proposal.based_on_revision == snapshot.state.revision):
             self.context_policy.validate_compaction(snapshot, proposal)
         result = self.journal.apply_compaction(proposal)
+        emit_trace(self.trace, 'runtime.context', proposal.proposal_id, reason='public_compaction',
+                   result=asdict(result), snapshot=asdict(self.journal.fast_snapshot(self.character_id)))
         if result.accepted and not replay:
             covered = tuple(dict.fromkeys([
                 *(s for item in snapshot.epoch.items for s in item.source_event_ids),
@@ -207,6 +214,7 @@ class Runtime:
     async def _run_fast(self, message: FastInput, snapshot: FastSnapshot) -> None:
         self._emit(RuntimeOutput("reply.started", self.character_id, snapshot.state.revision, message.turn_id))
         chunks: list[str] = []
+        observed = perf_counter()
         try:
             async with aclosing(self.fast.stream(snapshot, message)) as stream:
                 async for chunk in stream:
@@ -217,6 +225,9 @@ class Runtime:
                     chunks.append(chunk)
                     self._emit(RuntimeOutput("reply.delta", self.character_id, snapshot.state.revision,
                                              message.turn_id, chunk, len(chunks)))
+                    if perf_counter() - observed >= .1:
+                        emit_trace(self.trace, 'fast.progress', message.turn_id, partial=''.join(chunks))
+                        observed = perf_counter()
             if self._stopping or asyncio.current_task() is not self._fast_task:
                 raise asyncio.CancelledError
             self._finish(message, snapshot, "completed", "".join(chunks))
@@ -323,6 +334,8 @@ class Runtime:
                 await self._cancel_fast("shutdown")
             finally:
                 await self._deep_worker.close()
+                emit_trace(self.trace, 'runtime.lifecycle', self.character_id, phase='stopped',
+                           snapshot=asdict(self.journal.fast_snapshot(self.character_id)))
 
     async def __aenter__(self) -> "Runtime":
         await self.start()

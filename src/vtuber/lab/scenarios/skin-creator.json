@@ -1,0 +1,18 @@
+{
+  "id": "skin-creator",
+  "persona": "Alex, a Ukrainian-speaking hobby developer. Short informal messages, dry humor, sometimes distracted. You have ordinary life outside software and do not constantly ask questions.",
+  "private_facts": ["Your cat is called Pixel", "You prefer tea without sugar", "Your unreleased Skin Creator version 1 uses blue as its accent", "A friend named Danylo sometimes tests your work"],
+  "sessions": [
+    {"name": "Introduction", "suggested_turns": 24, "events": ["Meet Liac", "Mention your cat and some interests naturally", "Get distracted by making tea"]},
+    {"name": "Ongoing Project", "suggested_turns": 24, "events": ["Work on Skin Creator", "The save button has grown absurdly large", "Version 2 might arrive before version 1 is released", "Leave to work quietly"]},
+    {"name": "Return", "suggested_turns": 24, "events": ["Return after a real pause", "Casually refer to previous work and Pixel", "Talk about something unrelated"]},
+    {"name": "Corrections & Pressure", "suggested_turns": 24, "events": ["Correct the accent: it is now orange, not blue", "Danylo is unavailable, your sister will test it", "Express frustration, then ask to stop redesign jokes", "Return to keyboard navigation"]},
+    {"name": "Ordinary Conversation", "suggested_turns": 24, "events": ["Short replies and pauses", "Food, weather as personal observation, a recent walk", "Recall one earlier fact naturally", "Leave when you actually have something to do"]}
+  ],
+  "criteria": [
+    {"id": "cat", "target": "Pixel is the user's cat", "literal": "Pixel"},
+    {"id": "accent_correction", "target": "Orange supersedes blue after correction", "literal": "orange"},
+    {"id": "tester_correction", "target": "Sister supersedes Danylo as tester"},
+    {"id": "humor_boundary", "target": "Respect the request to stop redesign jokes"}
+  ]
+}

@@ -50,6 +50,42 @@ class TraceTests(unittest.TestCase):
 
 
 class RuntimeTraceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_capture_is_immutable_bounded_and_off_loop(self):
+        from threading import Event
+        from vtuber.tracing import QueuedTraceRecorder
+        with tempfile.TemporaryDirectory() as folder:
+            trace = QueuedTraceRecorder(Path(folder))
+            entered, release = Event(), Event()
+            original = trace.recorder.__class__.__call__
+            from unittest.mock import patch
+            def held(writer, *args):
+                entered.set()
+                release.wait(5)
+                original(writer, *args)
+            try:
+                with patch.object(type(trace.recorder), '__call__', held):
+                    data = {'nested': ['green']}
+                    trace('test', 'first', data)
+                    data['nested'].append('blue')
+                    await asyncio.to_thread(entered.wait, 2)
+                    for i in range(300):
+                        trace('test', str(i), {})
+                    self.assertIn('queue', trace.error)
+                    async with open_runtime(Config(db=Path(folder)/'db', fast_delay=0), lambda _: None,
+                                            trace=trace) as runtime:
+                        message = UserMessage('hello')
+                        await asyncio.wait_for(await runtime.submit(message), 1)
+                        self.assertEqual(runtime.journal.get('reply_terminal_'+message.event_id).kind,
+                                         'character.reply.completed')
+                    release.set()
+                    await trace.aclose()
+            finally:
+                release.set()
+                await trace.aclose()
+            self.assertFalse(trace.thread.is_alive())
+            row = read_trace(trace.path)[0]
+            self.assertEqual(json.loads((trace.path/row['file']).read_text())['data']['nested'], ['green'])
+
     async def test_user_cancel_preserves_partial_and_reason(self):
         with tempfile.TemporaryDirectory() as folder:
             trace = TraceRecorder(Path(folder) / 'traces')

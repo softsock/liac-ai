@@ -46,6 +46,9 @@ class DeepWorker:
         self.notify()
 
     def notify(self, *, compact: bool = False) -> None:
+        if not self._wake.is_set() and not self._stopping:
+            emit_trace(self.trace,'deep.phase',self.character_id,phase='queued',
+                       reason='context_pressure_check' if compact else 'journal_check')
         self._compact |= compact
         self._wake.set()
 
@@ -134,6 +137,8 @@ class DeepWorker:
                     start = perf_counter()
                     if trace_enabled(self.trace):
                         emit_trace(self.trace, 'deep.started', request.request_id, request=asdict(request))
+                    emit_trace(self.trace, 'deep.phase', request.request_id, phase='analyzing',
+                               attempt=failures+1, reason='context_pressure' if pressure else 'dialogue')
                     async with asyncio.timeout(self.timeout):
                         result = await self.mind.propose(request)
                     if self._stopping:
@@ -194,6 +199,8 @@ class DeepWorker:
                         # Notifications accumulated during this failed cycle do not bypass its cap.
                         self._wake.clear()
                         break
+                    emit_trace(self.trace, 'deep.phase', request.request_id if request else self.character_id,
+                               phase='retry', attempt=failures+1, wait_seconds=2**failures, reason=self.error)
                     failures = 0 if await self._backoff(2**failures) else failures + 1
 
     async def close(self) -> None:

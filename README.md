@@ -243,7 +243,37 @@ existing opportunities and never call Luna. Restart cancels pending work instead
 of resuming speech. Completed autonomous speech is real assistant history; its
 input is `character.initiative.started`, never a fabricated user message.
 
-The desktop keeps initiative off; existing chat history displays completed
-autonomous speech as Fast. See [implementation and live evidence](docs/M4_3_IMPLEMENTATION.md).
+The source Conversation Lab has an `Enable initiative` checkbox, off by default.
+See [M4.3 implementation and live evidence](docs/M4_3_IMPLEMENTATION.md).
+
+## Conversation Lab (M4.4)
+
+The source PySide6 inspector now supports manual conversation, an independent
+OMP user simulator, live process inspection, captured context history and offline
+replay. Start with `python -m vtuber.desktop --root .` or `Start-Inspector.cmd`.
+The existing bundled executable predates M4.4; use the source launcher.
+
+Simulation Start creates a separate database under ignored `.data/lab/run-*`.
+Pause/Resume control the simulated user; manual input pauses it. Stop simulation
+leaves Runtime available for manual chat; the top-level Stop closes owned models.
+The simulator sees only public conversation and its own private scenario.
+
+```powershell
+python -m vtuber.lab --turns 12 --enable-initiative --omp-executable "$env:LOCALAPPDATA/omp/omp.exe"
+python -m vtuber.lab --turns 120 --enable-initiative --omp-executable "$env:LOCALAPPDATA/omp/omp.exe"
+python -m vtuber.desktop --root . --replay .data/lab/run-EXAMPLE
+python -m vtuber.lab report .data/lab/run-EXAMPLE
+```
+
+`--simulator-model`, `--luna-model`, `--endpoint`, `--model`, `--tokenizer`,
+`--scenario PATH`, `--duration-seconds`, `--seed` and `--pause-scale` configure
+headless runs. Pauses are real by default; scaling changes only simulator waits,
+never Journal time. `--resume RUN_PATH` explicitly continues a stopped/interrupted
+simulation with its recorded settings. Open run/replay never performs inference.
+Optional post-run subjective assessment: `report RUN_PATH --judge-model MODEL`.
+
+Full long-running acceptance is **deferred at the user's request**. The initial
+live smoke was interrupted after five simulated messages; it is not a completed
+12-turn or multi-hour test. See [architecture, evidence and limits](docs/M4_4_CONVERSATION_LAB.md).
 Opt-in acceptance: `python scripts/verify_m2_luna.py --phase initiative`; controlled
 cache probes: `python scripts/verify_m1_5_context.py --phase initiative-cache`.

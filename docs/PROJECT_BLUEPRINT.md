@@ -759,6 +759,13 @@ For every handled turn produce inspectable trace metadata: input `event_id`, `tu
 
 ### 18.2 Developer inspector [CLI first]
 
+**2026-11-13 DECIDED (M4.4):** the source PySide6 inspector evolves into Conversation
+Lab. A headless research client can simulate a user through the same Runtime API,
+with isolated run storage and no access to Liac's hidden state. Bounded queued
+observations support live inspection and historical replay without changing
+cognitive policy. Scenario/timing choices remain EXPERIMENT; full long-running
+acceptance is deferred by the user. See [M4.4](M4_4_CONVERSATION_LAB.md).
+
 **2026-11-13 DECIDED:** desktop developer mode records bounded private request
 snapshots separately from domain events. Fast wire prompts are exact; Luna's
 configured role, submitted JSON and visible OMP session messages are labelled as

@@ -1,6 +1,9 @@
 """Private append-only request snapshots; never a source of domain truth."""
 import json
 import re
+import asyncio
+from queue import Queue, Empty, Full
+from threading import Lock, Thread
 from pathlib import Path
 from uuid import uuid4
 
@@ -46,8 +49,80 @@ class TraceRecorder:
             self.error = f'Trace capture stopped ({type(error).__name__}). Chat continues.'
 
 
+class QueuedTraceRecorder:
+    """Freeze observations promptly; one owned thread performs all file writes."""
+
+    def __init__(self, root: Path, max_bytes: int = 128 * 1024 * 1024, on_record=None) -> None:
+        self.recorder = TraceRecorder(root, max_bytes, on_record)
+        self.path = self.recorder.path
+        self.queue = Queue(maxsize=256)
+        self._lock = Lock()
+        self._pending_bytes = 0
+        self._error = None
+        self._closed = False
+        self.dropped = 0
+        self.thread = Thread(target=self._write, name='liac-trace-write', daemon=True)
+        self.thread.start()
+
+    @property
+    def error(self):
+        return self._error or self.recorder.error
+
+    @property
+    def on_record(self):
+        return self.recorder.on_record
+
+    @on_record.setter
+    def on_record(self, callback):
+        self.recorder.on_record = callback
+
+    def __call__(self, kind: str, request_id: str, data: dict[str, object]) -> None:
+        if self.error or self._closed:
+            self.dropped += 1
+            return
+        payload = canonical_json({**data, 'captured_at': utc_now()}).encode('utf-8')
+        if len(payload) > 2 * 1024 * 1024:
+            self.dropped += 1
+            payload = canonical_json({'omitted': True, 'reason': 'record exceeds 2 MiB',
+                                      'captured_at': utc_now()}).encode('utf-8')
+        with self._lock:
+            if self._pending_bytes + len(payload) > 8 * 1024 * 1024:
+                self._error = 'Trace queue limit reached; capture stopped. Chat continues.'
+                self.dropped += 1
+                return
+            try:
+                self.queue.put_nowait((kind, request_id, payload))
+                self._pending_bytes += len(payload)
+            except Full:
+                self._error = 'Trace queue limit reached; capture stopped. Chat continues.'
+                self.dropped += 1
+
+    def _write(self):
+        while True:
+            try:
+                kind, request_id, payload = self.queue.get(timeout=.05)
+            except Empty:
+                if self._closed:
+                    return
+                continue
+            try:
+                self.recorder(kind, request_id, json.loads(payload))
+            except Exception as error:
+                self._error = f'Trace capture stopped ({type(error).__name__}). Chat continues.'
+            finally:
+                with self._lock:
+                    self._pending_bytes -= len(payload)
+                self.queue.task_done()
+
+    async def aclose(self) -> None:
+        self._closed = True
+        await asyncio.to_thread(self.thread.join)
+
+
 def read_trace(path: Path) -> list[dict]:
     index = path / 'index.jsonl'
+    if index.resolve().parent != path.resolve():
+        raise ValueError('Trace index points outside this run')
     if not index.exists():
         return []
     rows = []

@@ -21,3 +21,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "vtuber.minds" = ["character.md", "deep.md"]
+"vtuber.lab" = ["simulator.md", "scenarios/*.json"]
