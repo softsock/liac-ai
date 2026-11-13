@@ -107,7 +107,12 @@ class DeepWorker:
                     before = self.journal.fast_snapshot(self.character_id) if trace_enabled(self.trace) else None
                     decision = self.journal.apply_deep(request, result, compaction_error=budget_error)
                     self.diagnostics.update(commit_ms=round((perf_counter()-start)*1000, 3),
-                        decision=decision.reason, acknowledged=decision.acknowledged)
+                        decision=decision.reason, acknowledged=decision.acknowledged,
+                        attention_changed=len(decision.attention_signal_ids))
+                    signals = self.journal._attention_all(self.character_id)
+                    self.diagnostics.update(attention_pending=sum(s.status == 'noticed' for s in signals),
+                        attention_deferred=sum(s.status == 'deferred' for s in signals),
+                        attention_expired=sum(s.status == 'expired' for s in signals))
                     if trace_enabled(self.trace):
                         emit_trace(self.trace, 'deep.decision', request.request_id,
                                    result=asdict(result), decision=asdict(decision), before=asdict(before),
