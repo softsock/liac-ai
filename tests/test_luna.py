@@ -24,8 +24,41 @@ class LunaParserTests(unittest.TestCase):
         self.assertEqual(result.compaction.items[0].source_event_ids, ('source',))
         self.assertEqual(result.compaction.compacted_through_sequence, 1)
 
+    def test_markdown_replace_clear_and_utf8_limit(self):
+        for text in ('', '  # Custom\n' + 'x'*1100 + '\n ', '🙂'*8192):
+            result = parse_result(json.dumps({'schema_version': 1, 'note': {
+                'text': text, 'source_event_ids': ['source']}, 'compaction': None},
+                ensure_ascii=False), self.request)
+            self.assertEqual(result.note.note, text)
+        with self.assertRaises(ValueError):
+            parse_result(json.dumps({'schema_version': 1, 'note': {
+                'text': '🙂'*8193, 'source_event_ids': ['source']}, 'compaction': None},
+                ensure_ascii=False), self.request)
+
     def test_explicit_noop(self):
         self.assertEqual(parse_result('{"schema_version":1,"note":null,"compaction":null}', self.request), DeepResult(1, 'request'))
+
+    def test_initiative_actions_and_boundaries(self):
+        from dataclasses import replace
+        request = replace(self.request, initiative_allowed=True)
+        def parse(value):
+            return parse_result(json.dumps(dict(schema_version=2, note=None,
+                compaction=None, initiative=value)), request).initiative
+        speak = dict(action='speak', intent='Tease about the unfinished hat',
+                     reason='The user left the design unfinished', source_event_ids=['source'])
+        self.assertEqual(parse(speak).source_event_ids, ('source',))
+        self.assertIsNone(parse(None))
+        self.assertIsNone(parse({'action': 'none'}))
+        self.assertEqual(parse({'action': 'cancel', 'reason': 'Topic finished'}).reason, 'Topic finished')
+        for change in (dict(intent=''), dict(reason='x'*1001), dict(source_event_ids=['missing']),
+                       dict(delay_seconds=True), dict(ttl_seconds=float('inf')),
+                       dict(delay_seconds=-1), dict(delay_seconds=3, ttl_seconds=2),
+                       dict(proposal_id='untrusted')):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                parse({**speak, **change})
+        with self.assertRaises(ValueError):
+            parse_result(json.dumps(dict(schema_version=2, note=None, compaction=None,
+                initiative=speak)), self.request)
 
     def test_note_can_cite_prior_snapshot_history(self):
         from dataclasses import replace
@@ -39,7 +72,7 @@ class LunaParserTests(unittest.TestCase):
             '{"schema_version":2,"note":null,"compaction":null}',
             '{"schema_version":1,"note":null}', '```json\n{}\n```', '{} trailing',
             json.dumps({'schema_version': 1, 'note': None, 'compaction': None, 'tools': []})]
-        for note in [True, {'text': 'x'*1001, 'source_event_ids': ['source']},
+        for note in [True, {'text': 'x'*32769, 'source_event_ids': ['source']},
                      {'text': 'x', 'source_event_ids': ['invented']},
                      {'text': 'x', 'source_event_ids': ['source']*33}]:
             bad.append(json.dumps({'schema_version': 1, 'note': note, 'compaction': None}))

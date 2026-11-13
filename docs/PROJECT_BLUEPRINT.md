@@ -308,6 +308,17 @@ template locally with the pinned tokenizer, plus one backend BOS; startup verifi
 provider parity. Reserve 512 output + 32 margin from 16384, leaving 15840 input.
 Never truncate identity, active note or current input; reject required overflow.
 
+**DECIDED (M4.2, 2026-11-13):** Replace the 1000-character active note policy
+with one free-form Luna-managed Markdown context in the mutable tail, after exact
+history and before current input. No revision/timestamps in that block. Optional
+near-ready lines are permitted; current user corrections override stale ideas.
+Initial configurable cap: 2048 incremental rendered tokens, compared live with
+1024; structural limit 32768 UTF-8 bytes. Do not reserve unused document capacity.
+SQLite schema v2 and internal note names remain; context.md is only a recoverable
+atomic projection. Empty clears, null/identical preserve revision. New ordinary
+input is not a conflict; existing revision/epoch CAS and source checks remain.
+75% semantic preparation and >90% fallback are unchanged.
+
 ### 7.3 Fast is not a permanent LM Studio session
 
 **DECIDED (M1, 2026-11-12):** Compile identity → retained exact history → quoted runtime state/note → current input. Updating a note/revision leaves the identity/history prefix unchanged when the retained history stays identical; a longer note can evict history under budget pressure. Keep newest-20-event selection and whole-message eviction; window shifts can still invalidate most of the prefix. Cache availability must not change correctness.
@@ -373,6 +384,13 @@ Luna timeout/offline/rate limit: mark Deep degraded, retry with exponential back
 
 **Boundary:** Luna proposes `DeepProposalBatch`; `RuntimeReducer` validates and applies proposals. No direct mutation of live Fast prompts, Journal or database by Luna/OMP tools.
 
+**DECIDED (M4.2):** The implemented schema-v1 envelope contains optional
+`note: {text, source_event_ids}` and optional M2 `compaction`; Runtime supplies all
+authority fields. Markdown is one text field, without a mandatory section schema.
+The structured attention taxonomy, performance beat scheduler and richer envelope
+below remain **FUTURE**, not requirements for the current runtime. See
+[M4.2 implementation](M4_2_IMPLEMENTATION.md) for behavior and measured limits.
+
 ### 9.1 Proposal envelope
 
 ```json
@@ -421,7 +439,8 @@ This is **illustrative shape**, not final Pydantic field naming; an implementati
 - `intention.propose` / `.abandon` – personal goal candidates, not automatic tool commands.
 - `task.result.publish` – completed analysis/result, with provenance and exactness flag.
 
-The v0 implementation requires only context notes and beats. Memory/intention/result operations are typed and documented now, but not implemented until milestones. Unknown types reject with explicit diagnostic; do not auto-create generic dict-based plugins.
+The original v0 proposal required context notes and beats; M4.2 implements only
+Markdown context and the existing epoch compaction. Beats remain FUTURE. Memory/intention/result operations are typed and documented now, but not implemented until milestones. Unknown types reject with explicit diagnostic; do not auto-create generic dict-based plugins.
 
 ### 9.3 Proposal precedence and conflicts
 
@@ -555,6 +574,17 @@ Unit tests that write a known fact then search for it do not test memory quality
 ## 12. Initiative, humor and performance beats
 
 ### 12.1 Character agency principles
+
+**DECIDED (M4.3, 2026-11-13):** Implement bounded opt-in initiative with one typed
+Luna opportunity, one Runtime readiness task and the existing Fast pipeline.
+Markdown remains the only working perspective. `none` preserves; explicit `cancel`
+withdraws. New user input wins. Runtime consumes an attempt atomically before
+speech, persists a distinct character input, and never calls Luna from a timer.
+Autonomous-only observations wait for the next ordinary batch or genuine compaction.
+Configurable delay/TTL/cooldown 5/120/60 seconds are **EXPERIMENT** starting values,
+not calibrated optima. Restart cancels pending work. Full beat machinery below,
+psychological scoring and long-term memory remain **FUTURE**.
+See [M4.3 implementation](M4_3_IMPLEMENTATION.md) for actual behavior and limits.
 
 The character should occasionally *want* something, not merely respond. Ideas must arise from past experiences, preferences, environment or ongoing intentions, not random timer-only text. An autonomous action can be silence, observation, expression change or asking a question. Avoid endless engagement optimization.
 

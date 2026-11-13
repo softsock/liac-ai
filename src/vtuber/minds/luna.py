@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 import json
 
 from vtuber.contracts.context import CompactionProposal, ContextItem
-from vtuber.contracts.deep import DeepRequest, DeepResult, evidence_ids
+from vtuber.contracts.deep import DeepRequest, DeepResult, InitiativeProposal, InitiativeCancel, evidence_ids
 from vtuber.contracts.events import canonical_json
 from vtuber.contracts.state import NoteProposal
 from vtuber.contracts.trace import TraceSink, emit_trace
@@ -51,18 +51,21 @@ def parse_result(text: str, request: DeepRequest) -> DeepResult:
     def invalid(value):
         raise ValueError('Nonfinite Deep value')
 
-    data = _object(json.loads(text, object_pairs_hook=pairs, parse_constant=invalid),
-                   {'schema_version', 'note', 'compaction'})
-    if type(data['schema_version']) is not int or data['schema_version'] != 1:
+    data = json.loads(text, object_pairs_hook=pairs, parse_constant=invalid)
+    if not isinstance(data, dict) or type(data.get('schema_version')) is not int or data['schema_version'] not in (1, 2):
         raise ValueError('Unsupported Deep schema')
+    _object(data, {'schema_version', 'note', 'compaction'} | ({'initiative'} if data['schema_version'] == 2 else set()))
     snapshot = request.snapshot
     evidence = evidence_ids(request)
     note = None
     if data['note'] is not None:
         value = _object(data['note'], {'text', 'source_event_ids'})
+        text = value['text']
+        if not isinstance(text, str) or len(text.encode('utf-8')) > 32768:
+            raise ValueError('Invalid working context')
         note = NoteProposal(request.request_id + ':note', snapshot.state.character_id,
             snapshot.state.revision, snapshot.through_sequence,
-            _sources(value['source_event_ids'], evidence), _text(value['text'], 1000))
+            _sources(value['source_event_ids'], evidence), text)
     compaction = None
     if data['compaction'] is not None:
         if request.compaction is None:
@@ -83,7 +86,28 @@ def parse_result(text: str, request: DeepRequest) -> DeepResult:
         compaction = CompactionProposal(request.request_id + ':epoch', snapshot.state.character_id,
             snapshot.epoch.version, snapshot.state.revision, snapshot.through_sequence,
             request.compaction.cutoff, tuple(items))
-    return DeepResult(1, request.request_id, note, compaction)
+    initiative = None
+    value = data.get('initiative')
+    if value is not None:
+        if not isinstance(value, dict):
+            raise ValueError('Invalid initiative')
+        action = value.get('action')
+        if action == 'none':
+            _object(value, {'action'})
+        elif action == 'cancel':
+            _object(value, {'action', 'reason'})
+            initiative = InitiativeCancel(_text(value['reason'], 1000))
+        elif action == 'speak':
+            if not request.initiative_allowed:
+                raise ValueError('Initiative not allowed')
+            required = {'action', 'intent', 'reason', 'source_event_ids'}
+            if not required <= value.keys() <= required | {'delay_seconds', 'ttl_seconds'}:
+                raise ValueError('Unexpected initiative fields')
+            initiative = InitiativeProposal(_text(value['intent'], 1000), _text(value['reason'], 1000),
+                _sources(value['source_event_ids'], evidence), value.get('delay_seconds'), value.get('ttl_seconds'))
+        else:
+            raise ValueError('Invalid initiative action')
+    return DeepResult(data['schema_version'], request.request_id, note, compaction, initiative)
 
 
 def render_request(request: DeepRequest) -> str:

@@ -6,13 +6,15 @@ from hashlib import sha256
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Iterator
 
-from vtuber.contracts.events import CharacterId, Event, canonical_json, utc_now
+from vtuber.contracts.events import CharacterId, CharacterInitiative, Event, canonical_json, utc_now
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextEpoch, ContextItem
 from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal, UpdateResult
 from vtuber.runtime.state import RevisionConflict, reduce_note
-from vtuber.contracts.deep import CompactionInput, DeepRequest, DeepResult, DeepDecision, evidence_ids
+from vtuber.contracts.deep import (CompactionInput, DeepRequest, DeepResult, DeepDecision, evidence_ids,
+    InitiativeProposal, InitiativeCancel, validate_initiative_timing)
 
 
 class EventConflict(ValueError):
@@ -222,7 +224,7 @@ class Journal:
         for row in rows:
             data = json.loads(row[0])
             last_kind = data["kind"]
-            if last_kind == "user.message.completed":
+            if last_kind in ('user.message.completed', 'character.initiative.started'):
                 if not data["turn_id"]:
                     return "invalid_cutoff"
                 users.add(data["turn_id"])
@@ -239,7 +241,9 @@ class Journal:
         return row[0] if row else 0
 
     def deep_request(self, character_id: str, *, request_id: str,
-                     max_events: int = 100, compact: bool = False) -> DeepRequest | None:
+                     max_events: int = 100, compact: bool = False,
+                     working_context_tokens: int = 2048, initiative_allowed: bool = False,
+                     initiative_delay_seconds: float = 5.0, initiative_ttl_seconds: float = 120.0) -> DeepRequest | None:
         if max_events < 1 or not request_id.strip():
             raise ValueError('Invalid Deep request')
         with self._transaction():
@@ -249,7 +253,7 @@ class Journal:
                                         (character_id, cursor)):
                 event = self._decode(row)
                 pending.append(event)
-                if event.kind == 'user.message.completed':
+                if event.kind in ('user.message.completed', 'character.initiative.started'):
                     opened.add(event.turn_id)
                 elif event.kind in ('character.reply.completed', 'character.reply.cancelled', 'character.reply.failed'):
                     opened.discard(event.turn_id)
@@ -262,10 +266,12 @@ class Journal:
                 return None
             through = events[-1].sequence if events else cursor
             dialogue = any(e.kind == 'user.message.completed' for e in events)
+            autonomous = any(e.kind == 'character.initiative.started' for e in events)
             if events and not dialogue:
-                self._acknowledge(character_id, cursor, through)
-                cursor = through
-                events = ()
+                if not autonomous:
+                    self._acknowledge(character_id, cursor, through)
+                    cursor = through
+                    events = ()
             epoch = self.context_epoch(character_id)
             rows = self._db.execute('SELECT * FROM events WHERE character_id=? AND sequence<=? ORDER BY sequence',
                                     (character_id, through)).fetchall()
@@ -286,13 +292,28 @@ class Journal:
                 tuple(e for e in eligible if e.sequence > epoch.compacted_through_sequence), epoch,
                 tuple((e.turn_id, e.sequence) for e in terminals if e.sequence > epoch.compacted_through_sequence))
             # Audit records are decisions, not new observations for the model.
-            observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.')))
-            return DeepRequest(request_id, snapshot, cursor, observed, compaction)
+            observed = tuple(e for e in events if not e.kind.startswith(('deep.', 'state.patch.', 'context.epoch.', 'initiative.')))
+            return DeepRequest(request_id, snapshot, cursor, observed, compaction, working_context_tokens,
+                initiative_allowed, utc_now() if initiative_allowed else '', initiative_delay_seconds, initiative_ttl_seconds)
 
     def apply_deep(self, request: DeepRequest, result: DeepResult, *,
-                   compaction_error: str | None = None) -> DeepDecision:
-        fingerprint = sha256(canonical_json({'request': asdict(request), 'result': asdict(result),
-            'compaction_error': compaction_error}).encode()).hexdigest()
+                   compaction_error: str | None = None, context_error: str | None = None) -> DeepDecision:
+        request_data = asdict(request)
+        # Default omission preserves fingerprints of pre-Markdown schema-v1 batches.
+        if request.working_context_tokens == 2048:
+            del request_data['working_context_tokens']
+        for key, default in dict(initiative_allowed=False, captured_at='',
+                initiative_delay_seconds=5.0, initiative_ttl_seconds=120.0).items():
+            if request_data[key] == default:
+                del request_data[key]
+        result_data = asdict(result)
+        if result.initiative is None:
+            del result_data['initiative']
+        fingerprint_data = {'request': request_data, 'result': result_data,
+                            'compaction_error': compaction_error}
+        if context_error is not None:
+            fingerprint_data['context_error'] = context_error
+        fingerprint = sha256(canonical_json(fingerprint_data).encode()).hexdigest()
         character = request.snapshot.state.character_id
         audit_id = 'deep_' + request.request_id
         with self._transaction():
@@ -304,14 +325,16 @@ class Journal:
                 value = payload['decision']
                 return DeepDecision(value['request_id'], UpdateResult(**value['note']) if value['note'] else None,
                     CompactionResult(**value['compaction']) if value['compaction'] else None,
-                    value['acknowledged'], value['reason'])
-            if result.request_id != request.request_id or type(result.schema_version) is not int or result.schema_version != 1:
+                    value['acknowledged'], value['reason'], value.get('initiative_reason'))
+            if result.request_id != request.request_id or type(result.schema_version) is not int or result.schema_version not in (1, 2):
                 raise ValueError('Invalid Deep result envelope')
             if self.cursor(character) != request.cursor_from:
                 raise ValueError('Deep cursor conflict')
             reason = ''
             state = self.snapshot(character)
             epoch = self.context_epoch(character)
+            initiative_fresh = (request.snapshot.state.revision == state.revision
+                                and request.snapshot.epoch.version == epoch.version)
             if result.note or result.compaction:
                 if request.snapshot.state.revision != state.revision:
                     reason = 'revision_conflict'
@@ -325,7 +348,7 @@ class Journal:
                         or p.observed_through_sequence != request.snapshot.through_sequence
                         or not set(p.source_event_ids) <= evidence):
                     reason = reason or 'invalid_note_dependencies'
-                reason = reason or self._validate_proposal(p)
+                reason = reason or context_error or self._validate_proposal(p)
             if result.compaction:
                 p = result.compaction
                 if (request.compaction is None or p.proposal_id != request.request_id+':epoch'
@@ -354,11 +377,142 @@ class Journal:
                 if result.note:
                     note_result = self._apply_note(result.note)
                 self._acknowledge(character, request.cursor_from, request.snapshot.through_sequence)
-            decision = DeepDecision(request.request_id, note_result, compaction_result, not reason, reason or 'applied')
+            initiative_reason = self._apply_initiative(request, result.initiative, fresh=initiative_fresh) if not reason else None
+            decision = DeepDecision(request.request_id, note_result, compaction_result, not reason,
+                reason or 'applied', initiative_reason)
             self._append(Event.create(character, 'deep.batch.completed' if not reason else 'deep.batch.rejected',
                 {'fingerprint': fingerprint, 'decision': asdict(decision),
                  'cursor_from': request.cursor_from, 'through': request.snapshot.through_sequence}, event_id=audit_id))
             return decision
+
+    def latest_user_sequence(self, character_id: str, through: int | None = None) -> int:
+        return self._db.execute("""SELECT COALESCE(MAX(sequence),0) FROM events WHERE character_id=?
+            AND sequence<=? AND json_extract(content,'$.kind')='user.message.completed'""",
+            (character_id, through if through is not None else self.high_watermark(character_id))).fetchone()[0]
+
+    def pending_initiative(self, character_id: str) -> Event | None:
+        row = self._db.execute("""SELECT * FROM events AS p WHERE character_id=?
+            AND json_extract(content,'$.kind')='initiative.proposed'
+            AND NOT EXISTS (SELECT 1 FROM events AS c WHERE c.event_id='initiative_closed_' || p.event_id)
+            ORDER BY sequence DESC LIMIT 1""", (character_id,)).fetchone()
+        return self._decode(row) if row else None
+
+    def _close_initiative(self, proposal_id: str, reason: str) -> None:
+        proposal = self.get(proposal_id)
+        if proposal is None or proposal.kind != 'initiative.proposed':
+            raise ValueError('Unknown initiative')
+        event_id = 'initiative_closed_' + proposal_id
+        if self.get(event_id) is None:
+            self._append(Event.create(proposal.character_id, 'initiative.closed',
+                dict(proposal_id=proposal_id, reason=reason), event_id=event_id, causation_id=proposal_id))
+
+    def close_initiative(self, proposal_id: str, reason: str) -> None:
+        with self._transaction():
+            self._close_initiative(proposal_id, reason)
+
+    def last_initiative_attempt(self, character_id: str) -> Event | None:
+        row = self._db.execute("""SELECT * FROM events WHERE character_id=?
+            AND json_extract(content,'$.kind')='character.initiative.started'
+            ORDER BY sequence DESC LIMIT 1""", (character_id,)).fetchone()
+        return self._decode(row) if row else None
+
+    def initiative_attempted(self, character_id: str, anchor: int) -> bool:
+        return self._db.execute("""SELECT 1 FROM events AS i JOIN events AS p
+            ON p.event_id=json_extract(i.content,'$.payload.proposal_id')
+            WHERE i.character_id=? AND json_extract(i.content,'$.kind')='character.initiative.started'
+            AND json_extract(p.content,'$.payload.anchor')=? LIMIT 1""", (character_id, anchor)).fetchone() is not None
+
+    def _apply_initiative(self, request: DeepRequest, proposal: InitiativeProposal | InitiativeCancel | None,
+                          *, fresh: bool) -> str:
+        if proposal is None:
+            return 'unchanged'
+        character = request.snapshot.state.character_id
+        anchor = self.latest_user_sequence(character, request.snapshot.through_sequence)
+        if not fresh or not anchor or anchor != self.latest_user_sequence(character):
+            return 'stale'
+        pending = self.pending_initiative(character)
+        if pending and pending.sequence > request.snapshot.through_sequence:
+            return 'stale'
+        if isinstance(proposal, InitiativeCancel):
+            if pending:
+                self._close_initiative(pending.event_id, 'luna_cancelled: '+proposal.reason)
+            return 'cancelled'
+        if not isinstance(proposal, InitiativeProposal):
+            raise ValueError('Invalid initiative proposal')
+        if not request.initiative_allowed:
+            return 'disabled'
+        if self.initiative_attempted(character, anchor):
+            return 'duplicate'
+        for source_id in proposal.source_event_ids:
+            source = self.get(source_id)
+            if (source_id not in evidence_ids(request) or source is None or source.character_id != character
+                    or source.sequence > request.snapshot.through_sequence
+                    or source.kind not in ('user.message.completed', 'character.reply.completed')):
+                raise ValueError('Invalid initiative evidence')
+        delay = proposal.delay_seconds if proposal.delay_seconds is not None else request.initiative_delay_seconds
+        ttl = proposal.ttl_seconds if proposal.ttl_seconds is not None else request.initiative_ttl_seconds
+        validate_initiative_timing(delay, ttl)
+        captured = datetime.fromisoformat(request.captured_at)
+        if captured.tzinfo is None:
+            raise ValueError('Initiative capture must be timezone-aware')
+        expires = captured + timedelta(seconds=ttl)
+        if datetime.fromisoformat(utc_now()) >= expires:
+            return 'expired'
+        key = sha256(canonical_json([proposal.intent.strip().casefold(), sorted(proposal.source_event_ids)]).encode()).hexdigest()
+        if self._db.execute("""SELECT 1 FROM events WHERE character_id=?
+            AND json_extract(content,'$.kind')='initiative.proposed'
+            AND json_extract(content,'$.payload.duplicate_key')=? LIMIT 1""", (character, key)).fetchone():
+            return 'duplicate'
+        if pending:
+            self._close_initiative(pending.event_id, 'replaced')
+        self._append(Event.create(character, 'initiative.proposed',
+            dict(intent=proposal.intent, reason=proposal.reason, source_event_ids=proposal.source_event_ids,
+                anchor=anchor, revision=self.snapshot(character).revision, epoch=self.context_epoch(character).version,
+                ready_at=(captured+timedelta(seconds=delay)).isoformat(), expires_at=expires.isoformat(),
+                duplicate_key=key), event_id='initiative_'+request.request_id, occurred_at=request.captured_at))
+        return 'accepted'
+
+    def claim_initiative(self, proposal_id: str, snapshot: FastSnapshot, *, cooldown_seconds: float = 0,
+                         checked_at: str | None = None) -> CharacterInitiative | None:
+        with self._transaction():
+            proposal = self.pending_initiative(snapshot.state.character_id)
+            if proposal is None or proposal.event_id != proposal_id:
+                return None
+            p = proposal.payload
+            # Runtime projects its arming UTC anchor with monotonic elapsed time.
+            now = datetime.fromisoformat(checked_at if checked_at is not None else utc_now())
+            if now.tzinfo is None:
+                raise ValueError('Initiative check must be timezone-aware')
+            reason = None
+            if now >= datetime.fromisoformat(p['expires_at']):
+                reason = 'expired'
+            elif (p['anchor'] != self.latest_user_sequence(proposal.character_id)
+                    or p['revision'] != self.snapshot(proposal.character_id).revision
+                    or p['epoch'] != self.context_epoch(proposal.character_id).version
+                    or snapshot.state != self.snapshot(proposal.character_id)
+                    or snapshot.epoch != self.context_epoch(proposal.character_id)
+                    or snapshot.through_sequence != self.high_watermark(proposal.character_id)):
+                reason = 'stale'
+            elif self.initiative_attempted(proposal.character_id, p['anchor']):
+                reason = 'duplicate'
+            if reason:
+                self._close_initiative(proposal_id, reason)
+                return None
+            if now < datetime.fromisoformat(p['ready_at']) or self.unfinished_inputs(proposal.character_id):
+                return None
+            last = self.last_initiative_attempt(proposal.character_id)
+            if last and (now - datetime.fromisoformat(last.occurred_at)).total_seconds() < cooldown_seconds:
+                return None
+            message = CharacterInitiative(p['intent'], p['reason'], proposal.character_id,
+                'initiative_input_'+proposal_id, 'initiative_turn_'+proposal_id, utc_now(), proposal_id)
+            self._close_initiative(proposal_id, 'claimed')
+            self._append(message.as_event())
+            self._append(Event.create(proposal.character_id, 'character.reply.started',
+                dict(snapshot_revision=snapshot.state.revision, through_sequence=snapshot.through_sequence,
+                     epoch_version=snapshot.epoch.version,
+                     compacted_through_sequence=snapshot.epoch.compacted_through_sequence),
+                event_id='reply_started_'+message.event_id, turn_id=message.turn_id, causation_id=message.event_id))
+            return message
 
     def _acknowledge(self, character_id: CharacterId, expected: int, through: int) -> None:
         if not expected <= through <= self.high_watermark(character_id):
@@ -397,10 +551,11 @@ class Journal:
         accepted = not reason
         self._db.execute("INSERT OR IGNORE INTO character_state(character_id) VALUES (?)",
                          (proposal.character_id,))
-        if accepted:
+        unchanged = accepted and state.revision == proposal.based_on_revision
+        if accepted and not unchanged:
             self._db.execute("UPDATE character_state SET revision=?, context_note=? WHERE character_id=?",
                              (state.revision, state.context_note, state.character_id))
-        result = UpdateResult(accepted, state.revision, reason or "applied")
+        result = UpdateResult(accepted, state.revision, reason or ("no_change" if unchanged else "applied"))
         self._append(Event.create(proposal.character_id,
             "state.patch.applied" if accepted else "state.patch.rejected",
             {"proposal": encoded, **asdict(result)}, event_id=audit_id,
@@ -412,7 +567,7 @@ class Journal:
     def _validate_proposal(self, proposal: NoteProposal) -> str:
         if not isinstance(proposal.proposal_id, str) or not proposal.proposal_id.strip():
             return "invalid_proposal_id"
-        if not isinstance(proposal.note, str) or not 1 <= len(proposal.note.strip()) <= 1000:
+        if not isinstance(proposal.note, str) or len(proposal.note.encode("utf-8")) > 32768:
             return "invalid_note"
         if type(proposal.based_on_revision) is not int or proposal.based_on_revision < 0:
             return "invalid_revision"
@@ -443,7 +598,7 @@ class Journal:
 
     def unfinished_inputs(self, character_id: CharacterId) -> tuple[Event, ...]:
         rows = self._db.execute("""SELECT * FROM events AS input WHERE character_id=?
-            AND json_extract(content, '$.kind') = 'user.message.completed'
+            AND json_extract(content, '$.kind') IN ('user.message.completed', 'character.initiative.started')
             AND NOT EXISTS (SELECT 1 FROM events AS ended
                 WHERE ended.character_id=input.character_id
                 AND json_extract(ended.content, '$.turn_id')=json_extract(input.content, '$.turn_id')

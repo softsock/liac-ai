@@ -1,6 +1,7 @@
 # liac-ai
 
-An autonomous AI VTuber backend. M2 connects optional GPT-6 Luna through OMP as
+An autonomous AI VTuber backend. M4.2 lets optional GPT-6 Luna manage a Markdown
+working context through the asynchronous M2 pipeline. M2 connects Luna through OMP as
 an asynchronous Deep Mind alongside local Nemotron. Durable context epochs,
 exact local token budgeting and deterministic offline fallback remain from M1.5.
 
@@ -80,7 +81,7 @@ settings need changing. Reasoning/control output causes a failed turn.
 
 Edit [character.md](src/vtuber/minds/character.md), or pass `--identity path/to/soul.md`;
 identity loads once at startup. Prompt order is identity → frozen quoted epoch
-extracts → growing exact history → quoted state/note → current input. The full
+extracts → growing exact history → Luna Markdown working context → current input. The full
 rendered template is counted locally, including the backend's single BOS token.
 Default input allowance is **15840**: 16384 context minus 512 output minus 32
 margin. Identity, active note and current input stay whole; overflow fails durably.
@@ -127,6 +128,32 @@ Deep/cancel checks; private raw logs and databases stay under ignored `.data/`.
 [PROJECT_BLUEPRINT](docs/PROJECT_BLUEPRINT.md) describes
 the wider project. One runtime owns a database at a time. Adapters must cooperate
 with cancellation. Optional GPT-6 Luna/OMP is available in M2 below.
+
+## Luna-managed Markdown context (M4.2)
+
+Luna replaces one free-form Markdown document asynchronously. Suggested Threads
+and almost-ready lines are optional; Fast chooses how to use them. Current user
+corrections take precedence over older ideas, including delayed updates. Revision
+and epoch conflicts still reject; an ordinary newer input alone does not.
+
+`--working-context-tokens 2048` is the initial configurable cap; use `1024` for a
+smaller working perspective. Only the document's actual rendered cost consumes
+Fast's allowance, with no preallocated reserve. New proposals are locally counted
+before the atomic SQLite batch commits. A separate 32768-byte UTF-8 ceiling bounds
+transport/storage. Lowering the cap preserves existing stored content; required
+full-prompt overflow still fails instead of silently discarding history.
+
+SQLite is authoritative. The readable projection is
+`<db filename>.contexts/<SHA-256 of character ID>/context.md` beside the DB.
+It contains only Markdown, written via atomic replacement after a changed commit
+and rebuilt on startup. Manual edits are never imported. A file error leaves the
+DB and Deep cursor committed; `/status` reports `context_export_error`. Retry is
+on the next changed document or restart. Keep the DB, projection and traces private.
+The existing `context_note`/`note` field names and schema v2 remain compatible.
+`note:null` preserves the document, `text:""` clears it, and identical text is an
+accepted no-op without a revision bump.
+
+See [M4.2 implementation and actual evidence](docs/M4_2_IMPLEMENTATION.md).
 
 ## Luna Deep Mind (M2)
 
@@ -191,3 +218,32 @@ does not magically recover missing prompts. Capture is bounded to 128 MiB per ru
 disk failure/limit stops capture visibly without deleting data or stopping chat.
 Trace persistence happens at request boundaries, not on every token. See
 [desktop implementation and verification](docs/DESKTOP_INSPECTOR.md).
+
+## Optional character initiative (M4.3)
+
+Autonomous speech is off by default. To let Luna occasionally propose a relevant
+line which Nemotron delivers through the ordinary Fast stream:
+
+```powershell
+python -m vtuber --fast-backend lmstudio --endpoint http://127.0.0.1:1230 --model liac-nemotron --deep-backend luna --enable-initiative
+```
+
+`--initiative-delay-seconds 5`, `--initiative-ttl-seconds 120` and
+`--initiative-cooldown-seconds 60` are configurable experimental defaults.
+Delay/TTL run from Luna request capture, so inference time counts toward both.
+Luna may provide proposal-specific delay/TTL. Require finite `0 <= delay < TTL`
+and nonnegative cooldown. Tune conversational rhythm from actual dialogue.
+
+Markdown remains the sole free-form working perspective. A separate bounded
+`speak` proposal carries intent, reason and canonical evidence. `none` preserves
+a pending intent; explicit `cancel` withdraws it. Runtime never interrupts Fast,
+gives new user input priority, and permits one attempt per real user anchor.
+An attempt is consumed even when its stream fails or is cancelled. Timers check
+existing opportunities and never call Luna. Restart cancels pending work instead
+of resuming speech. Completed autonomous speech is real assistant history; its
+input is `character.initiative.started`, never a fabricated user message.
+
+The desktop keeps initiative off; existing chat history displays completed
+autonomous speech as Fast. See [implementation and live evidence](docs/M4_3_IMPLEMENTATION.md).
+Opt-in acceptance: `python scripts/verify_m2_luna.py --phase initiative`; controlled
+cache probes: `python scripts/verify_m1_5_context.py --phase initiative-cache`.

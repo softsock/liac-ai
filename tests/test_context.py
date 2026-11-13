@@ -22,12 +22,36 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(before.messages[:-2], after.messages[:-2])
         self.assertNotEqual(before.messages[-2].content, after.messages[-2].content)
         self.assertEqual(before.messages[-1].content, current.text)
-        prefix_before = render_nemotron(before.messages).split("Runtime context (quoted data", 1)[0]
-        prefix_after = render_nemotron(after.messages).split("Runtime context (quoted data", 1)[0]
+        prefix_before = render_nemotron(before.messages).split("Luna working context (optional", 1)[0]
+        prefix_after = render_nemotron(after.messages).split("Luna working context (optional", 1)[0]
         self.assertEqual(prefix_before, prefix_after)
         self.assertIn("history reply", prefix_before)
         self.assertIn("old note", before.messages[-2].content)
         self.assertIn("new note", after.messages[-2].content)
+        from vtuber.contracts.events import CharacterInitiative, utc_now
+        autonomous = compiler.compile(FastSnapshot(CharacterState('primary', 2, 'new note'), 2, history),
+            CharacterInitiative('Tease about the hat', 'Unfinished design', 'primary', 'auto', 'auto-turn', utc_now(), 'proposal'))
+        self.assertEqual(after.messages[:-2], autonomous.messages[:-2])
+        self.assertTrue(autonomous.messages[-2].content.endswith('new note'))
+        self.assertIn('character-origin', autonomous.messages[-1].content)
+        self.assertNotIn('Respond to the final user message', autonomous.messages[-2].content)
+
+    def test_markdown_tail_and_configured_budget(self):
+        compiler = ContextCompiler('Identity', token_counter=lambda ms: sum(len(m.content) for m in ms), working_context_tokens=1024)
+        compiler.validate_working_context('x'*1024)
+        with self.assertRaises(ContextBudgetExceeded):
+            compiler.validate_working_context('x'*1025)
+        for invalid in (0, -1, True, compiler.input_limit):
+            with self.assertRaises(ValueError):
+                replace(compiler, working_context_tokens=invalid)
+        snapshot = self.history(1)
+        before = compiler.compile(snapshot, UserMessage('stop joking'))
+        after = compiler.compile(replace(snapshot, state=CharacterState('primary', 9, '# Ideas\n  hi  ')), UserMessage('stop joking'))
+        self.assertEqual(before.metadata()['stable_prefix_sha256'], after.metadata()['stable_prefix_sha256'])
+        self.assertTrue(after.messages[-2].content.endswith('# Ideas\n  hi  '))
+        self.assertNotIn('revision', after.messages[-2].content)
+        self.assertIn('current user corrections take precedence', after.messages[-2].content)
+        self.assertEqual(after.messages[-1].content, 'stop joking')
 
     def test_whole_epoch_overflow_requires_transition(self):
         current = UserMessage("current")
@@ -38,7 +62,7 @@ class ContextTests(unittest.TestCase):
         )
         snapshot = FastSnapshot(CharacterState("primary", 3, "a note"), 5, events)
         with self.assertRaises(ContextBudgetExceeded):
-            ContextCompiler("Identity", context_tokens=900, output_tokens=100).compile(snapshot, current)
+            ContextCompiler("Identity", context_tokens=900, output_tokens=100, working_context_tokens=100).compile(snapshot, current)
 
     def history(self, count, size=30):
         events, ends = [], []
@@ -70,8 +94,9 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(compiled.messages[1].role, 'user')
 
     def test_transition_preserves_anchor_recent_turns_note_and_sources(self):
-        compiler = ContextCompiler('Identity', 2400, 100)
-        snapshot = replace(self.history(12), state=CharacterState('primary', 1, 'required active note'))
+        compiler = ContextCompiler('Identity', 2400, 100, working_context_tokens=500)
+        snapshot = replace(self.history(12), state=CharacterState('primary', 1, 'required active note' + 'x'*480))
+        compiler.validate_working_context(snapshot.state.context_note)
         message = UserMessage('current')
         proposal = compiler.prepare_epoch(snapshot, message)
         self.assertIsNotNone(proposal)
@@ -97,7 +122,7 @@ class ContextTests(unittest.TestCase):
     def test_exact_budget_boundary_and_noop_prevention(self):
         snapshot = self.history(0)
         counter = lambda messages: sum(len(m.content) for m in messages)
-        compiler = ContextCompiler('Identity', 1000, 100, counter)
+        compiler = ContextCompiler('Identity', 1000, 100, counter, working_context_tokens=100)
         required = compiler.compile(snapshot, UserMessage('x')).estimated_input_tokens
         exact = replace(compiler, context_tokens=required + 132)
         self.assertEqual(exact.compile(snapshot, UserMessage('x')).metadata()['headroom_tokens'], 0)
@@ -107,7 +132,7 @@ class ContextTests(unittest.TestCase):
 
     def test_small_window_and_single_oversized_history_turn(self):
         snapshot = self.history(1, size=3000)
-        compiler = ContextCompiler('Identity', 1000, 100)
+        compiler = ContextCompiler('Identity', 1000, 100, working_context_tokens=100)
         p = compiler.prepare_epoch(snapshot, UserMessage('next'))
         self.assertEqual(p.compacted_through_sequence, 2)
         compiled = compiler.compile(replace(snapshot, epoch=ContextEpoch(1, 2, p.items)), UserMessage('next'))
@@ -118,7 +143,7 @@ class ContextTests(unittest.TestCase):
         first, current = UserMessage('old ' * 100), UserMessage('new')
         events = (replace(first.as_event(), sequence=1), replace(current.as_event(), sequence=2))
         snapshot = FastSnapshot(CharacterState('primary'), 3, events, terminal_turns=((first.turn_id, 3),))
-        compiler = ContextCompiler('Identity', 900, 100)
+        compiler = ContextCompiler('Identity', 900, 100, working_context_tokens=100)
         with self.assertRaises(ContextBudgetExceeded):
             compiler.prepare_epoch(snapshot, current)
 
@@ -134,7 +159,7 @@ class ContextTests(unittest.TestCase):
         for note, text in (("", "я" * 1000), ("я" * 1000, "current")):
             with self.subTest(note_length=len(note), input_length=len(text)):
                 with self.assertRaises(ContextBudgetExceeded):
-                    ContextCompiler("Identity", 600, 100).compile(
+                    ContextCompiler("Identity", 600, 100, working_context_tokens=100).compile(
                         FastSnapshot(CharacterState("primary", context_note=note), 0, ()), UserMessage(text))
 
     def test_empty_or_current_only_history_keeps_required_messages_once(self):

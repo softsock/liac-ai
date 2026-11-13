@@ -4,7 +4,7 @@
 
 Code lives in `src/vtuber/`: `contracts/` defines immutable data and ports, `runtime/` owns SQLite and task lifecycle, and `minds/` contains fake/LM Studio adapters and `character.md`. `context.py` compiles model-independent messages. `app.py` wires dependencies; `cli.py` is the inspector. Critical checks live in `tests/`. Local data defaults to ignored `.data/`.
 
-Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Memory, behavior and external interfaces remain future milestones.
+Read relevant sections of `docs/PROJECT_BLUEPRINT.md`, milestone implementation reports and nearest module `AGENTS.md` before editing. Long-term memory, richer behavior and external interfaces remain future milestones.
 
 ## Build, Test, and Development Commands
 
@@ -45,3 +45,11 @@ Use English only for application interface text and code comments.
 M2 adds optional Luna via the pinned SDK-only vendor under `vendor/omp-rpc`. Install with `python -m pip install -r requirements-luna.txt`; fake mode requires neither SDK nor credentials. Deep returns versioned results; Runtime alone commits decisions and acknowledgement.
 
 `desktop/` owns Qt Widgets and the asyncio worker bridge. Qt never enters core modules. Full developer snapshots go to bounded ignored `.data/traces/`, separate from domain events; capture failure cannot block model work. OMP session observations are not provider wire requests. Read `desktop/AGENTS.md` before changing UI/thread lifecycle.
+
+M4.2 uses one Luna-managed Markdown context; see `docs/M4_2_IMPLEMENTATION.md`.
+SQLite remains authoritative; keep projections and runtime traces private.
+
+M4.3 adds opt-in event-backed initiative, not a scheduler or second memory.
+`none` preserves pending work; only explicit cancel or Runtime guards close it.
+Keep character-origin inputs distinct from user messages, share Fast's pipeline,
+and never let an autonomous-only tail trigger more Luna work. See `docs/M4_3_IMPLEMENTATION.md`.
