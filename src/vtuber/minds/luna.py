@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 import json
 
 from vtuber.contracts.context import CompactionProposal, ContextItem
-from vtuber.contracts.attention import AttentionProposal, validate_attention
 from vtuber.contracts.deep import DeepRequest, DeepResult, evidence_ids
 from vtuber.contracts.events import canonical_json
 from vtuber.contracts.state import NoteProposal
@@ -53,8 +52,8 @@ def parse_result(text: str, request: DeepRequest) -> DeepResult:
         raise ValueError('Nonfinite Deep value')
 
     data = _object(json.loads(text, object_pairs_hook=pairs, parse_constant=invalid),
-                   {'schema_version', 'note', 'compaction', 'attention'})
-    if type(data['schema_version']) is not int or data['schema_version'] != 2:
+                   {'schema_version', 'note', 'compaction'})
+    if type(data['schema_version']) is not int or data['schema_version'] != 1:
         raise ValueError('Unsupported Deep schema')
     snapshot = request.snapshot
     evidence = evidence_ids(request)
@@ -84,20 +83,7 @@ def parse_result(text: str, request: DeepRequest) -> DeepResult:
         compaction = CompactionProposal(request.request_id + ':epoch', snapshot.state.character_id,
             snapshot.epoch.version, snapshot.state.revision, snapshot.through_sequence,
             request.compaction.cutoff, tuple(items))
-    if not isinstance(data['attention'], list) or len(data['attention']) > 16:
-        raise ValueError('Invalid attention list')
-    attention = []
-    for item in data['attention']:
-        value = _object(item, {'kind', 'significance', 'outcome', 'reason', 'source_event_ids',
-                              'ttl_seconds', 'target_signal_id', 'target_version', 'supersedes'})
-        if not isinstance(value['supersedes'], list):
-            raise ValueError('Invalid attention supersession')
-        p = AttentionProposal(value['kind'], value['significance'], value['outcome'], value['reason'],
-            _sources(value['source_event_ids'], evidence), value['ttl_seconds'], value['target_signal_id'],
-            value['target_version'], tuple(value['supersedes']))
-        validate_attention(p, evidence, request.attention_context)
-        attention.append(p)
-    return DeepResult(2, request.request_id, note, compaction, tuple(attention))
+    return DeepResult(1, request.request_id, note, compaction)
 
 
 def render_request(request: DeepRequest) -> str:

@@ -20,10 +20,3 @@ without rebasing. Read state/epoch/watermark/exact history in one short transact
 M2 `deep.py` owns one serialized observer, complete-turn batches and bounded retry. `apply_deep` commits all operation decisions plus cursor together; stale dependencies retain input for reconsideration. Audit-only tails never become model work. No-op compaction is coalesced by epoch/revision/cutoff.
 
 Notes and compaction both depend on the captured epoch. Startup cancels every accepted input without a terminal, including inputs persisted before reply.started. Worker stop prevents post-close application even when an adapter swallows cancellation.
-
-M4.1 SQLite v3 persists attention alongside Deep decisions and cursor atomically.
-`attention.py` owns pure provenance/ranking/preparation, Journal owns transactions.
-Exclude attention audit from model work. Deferred signals wait for a new complete
-turn; expiry never invokes Luna. UTC expiry survives restart; monotonic deadlines
-prevent in-process clock rollback from reviving existing opportunities. Attention
-candidate views expose the cursor: future consumers must check freshness before use.

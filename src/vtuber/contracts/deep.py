@@ -1,6 +1,5 @@
 """Versioned immutable Deep work and deterministic application decisions."""
 from dataclasses import dataclass
-from vtuber.contracts.attention import AttentionProposal, AttentionSignal
 
 from vtuber.contracts.context import CompactionProposal, CompactionResult
 from vtuber.contracts.events import Event
@@ -24,8 +23,6 @@ class DeepRequest:
     cursor_from: int
     events: tuple[Event, ...]
     compaction: CompactionInput | None = None
-    attention_context: tuple[AttentionSignal, ...] = ()
-    attention_sources: tuple[Event, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,7 +31,6 @@ class DeepResult:
     request_id: str
     note: NoteProposal | None = None
     compaction: CompactionProposal | None = None
-    attention: tuple[AttentionProposal, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,11 +40,10 @@ class DeepDecision:
     compaction: CompactionResult | None
     acknowledged: bool
     reason: str
-    attention_signal_ids: tuple[str, ...] = ()
 
 
 def evidence_ids(request: DeepRequest) -> set[str]:
-    events = request.events + request.snapshot.recent_dialogue + request.attention_sources
+    events = request.events + request.snapshot.recent_dialogue
     if request.compaction:
         events += request.compaction.events
     return {e.event_id for e in events if e.kind in ('user.message.completed', 'character.reply.completed')} | {

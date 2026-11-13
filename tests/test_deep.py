@@ -33,7 +33,7 @@ class DeepJournalTests(unittest.TestCase):
 
     def result(self, request, compact=False):
         source = request.events[0].event_id
-        return DeepResult(2, request.request_id,
+        return DeepResult(1, request.request_id,
             NoteProposal(request.request_id+':note', 'primary', request.snapshot.state.revision,
                 request.snapshot.through_sequence, (source,), 'new note'),
             CompactionProposal(request.request_id+':epoch', 'primary', request.snapshot.epoch.version,
@@ -70,7 +70,7 @@ class DeepJournalTests(unittest.TestCase):
         decision = self.journal.apply_deep(request, result)
         self.assertEqual(self.journal.apply_deep(request, result), decision)
         with self.assertRaises(EventConflict):
-            self.journal.apply_deep(request, DeepResult(2, 'replay'))
+            self.journal.apply_deep(request, DeepResult(1, 'replay'))
 
     def test_budget_rejection_is_durable_and_replayable(self):
         self.finish(self.user())
@@ -85,7 +85,7 @@ class DeepJournalTests(unittest.TestCase):
     def test_audit_tail_is_not_observation(self):
         self.finish(self.user())
         request = self.journal.deep_request('primary', request_id='no-op')
-        self.journal.apply_deep(request, DeepResult(2, 'no-op'))
+        self.journal.apply_deep(request, DeepResult(1, 'no-op'))
         self.assertIsNone(self.journal.deep_request('primary', request_id='tail'))
         self.assertEqual(self.journal.cursor('primary'), self.journal.high_watermark('primary'))
 
@@ -129,7 +129,7 @@ class DeepWorkerTests(unittest.IsolatedAsyncioTestCase):
             async def propose(self,request):
                 entered.set()
                 try:await asyncio.Event().wait()
-                except asyncio.CancelledError:return DeepResult(2,request.request_id)
+                except asyncio.CancelledError:return DeepResult(1,request.request_id)
         with tempfile.TemporaryDirectory() as folder:
             journal=Journal(Path(folder)/'runtime.db')
             try:
@@ -150,7 +150,7 @@ class DeepWorkerTests(unittest.IsolatedAsyncioTestCase):
             journal.close()
             journal = Journal(path)
             class Deep:
-                async def propose(self, request): return DeepResult(2,request.request_id)
+                async def propose(self, request): return DeepResult(1,request.request_id)
             try:
                 async with Runtime('primary',journal,FakeFast(0),Deep(),lambda _:None) as runtime:
                     await(await runtime.submit(UserMessage('after restart')))
@@ -203,7 +203,7 @@ class DeepWorkerTests(unittest.IsolatedAsyncioTestCase):
             async def propose(self, request):
                 self.calls += 1
                 self.compactions.append(request.compaction)
-                return DeepResult(2, request.request_id)
+                return DeepResult(1, request.request_id)
         with tempfile.TemporaryDirectory() as folder:
             journal = Journal(Path(folder)/'runtime.db')
             deep = Deep()
@@ -228,7 +228,7 @@ class DeepWorkerTests(unittest.IsolatedAsyncioTestCase):
                 requests.append(request)
                 entered.set()
                 await release.wait()
-                return DeepResult(2, request.request_id)
+                return DeepResult(1, request.request_id)
         with tempfile.TemporaryDirectory() as folder:
             journal = Journal(Path(folder)/'runtime.db')
             try:
