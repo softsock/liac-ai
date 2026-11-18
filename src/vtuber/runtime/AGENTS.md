@@ -19,3 +19,11 @@ Keep delay, consume-once, input locking, user priority and owned-task cancellati
 No relevance guards, TTL, cooldown or revision expiry. Restart cancels pending work
 and unfinished inputs. Trace failures cannot affect domain work. Keep provider
 clients outside Runtime and credentials/configuration out of domain events.
+
+## M6 opt-in runtime (not the legacy Fast/Deep worker)
+
+`single_mind.py` runs one Luna decision at a time. Ambient `state` and
+`observation` events update temporary conversation-scoped `LiveState`;
+they do not wake Luna or cancel streaming. A direct local message captures a
+frozen sensory snapshot after the existing Journal transaction. Do not move
+cognition into this runtime or add a second worker for attention.

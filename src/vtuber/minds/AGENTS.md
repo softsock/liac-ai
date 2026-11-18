@@ -29,3 +29,11 @@ belong in separate fine-tuning, not corrective code or personality instructions.
 Keep Markdown at the prompt tail. Initiative is a legacy experimental capability,
 disabled and outside the M4.7 role contract. None preserves pending work; cancel
 explicitly withdraws it. See docs/superpowers/specs/2026-11-16-m4-7-bolt-luna-roles.md.
+
+## M6 opt-in Luna
+
+`m6_context.py` projects complete native speech-tool calls and a small quoted,
+untrusted sensor frame; no Bolt/Deep instructions. `luna_stream.py` uses the
+minimal Bun/pi-ai bridge and a single active turn. M6 requires native
+`speak` / `stay_silent`, not JSON-only prose or OMP coding-agent prompts.
+Legacy adapters above remain untouched.

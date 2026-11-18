@@ -1,9 +1,11 @@
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import AsyncGenerator
 
-from vtuber.contracts.events import UserMessage, FastInput
+from vtuber.contracts.events import UserMessage, FastInput, new_id
+from vtuber.contracts.mind import MindDecision
 from vtuber.contracts.state import FastSnapshot
 from vtuber.contracts.deep import DeepRequest, DeepResult
 
@@ -34,3 +36,13 @@ class FakeDeep:
         latest = messages[-1]
         return DeepResult(3, request.request_id,
                           f"Last user message: {latest.payload['text'][:160]}")
+
+
+class FakeSingleMind:
+    async def generate(self, messages: tuple[dict[str, object], ...], *,
+                       on_speak_delta: Callable[[str], None] | None = None) -> MindDecision:
+        message = next(item['content'] for item in reversed(messages) if item['role'] == 'user')
+        text = f'You said: {message}'
+        if on_speak_delta is not None:
+            on_speak_delta(text)
+        return MindDecision('speak', text, new_id('call'))

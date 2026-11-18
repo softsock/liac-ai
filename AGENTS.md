@@ -69,3 +69,15 @@ Runtime checks technical budgets, ordering and atomic execution only. Budget-onl
 Epoch fallback is temporary degradation with durable Luna recovery. No initiative
 TTL/cooldown, evidence or revision guards. Preserve old Lab archives read-only.
 M4.5 verification is limited to short technical checks; no full provider simulation.
+
+## M6 Single Mind branch
+
+On `codex/m6-1-attention-live-state` and subsequent M6 branches, Luna is the
+**only character mind**. The M4.7 Bolt/Fast and Luna/Deep ownership notes above
+describe the legacy M5.0 path only. Follow `docs/PROJECT_BLUEPRINT.md` and
+`docs/M6_1_ATTENTION_LIVE_STATE.md` for the new opt-in implementation.
+
+Preserve the working legacy CLI. Keep perception wake, volatile Live State and
+tool-aware context minimal; no duplicate internal validation, background workers,
+model gate or extra database. Only tested permissions, persistence, scope, size
+and cancellation boundaries justify checks.

@@ -1,0 +1,9 @@
+{
+  "name": "liac-luna-bridge",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@oh-my-pi/pi-ai": "18.22.1",
+    "@oh-my-pi/pi-catalog": "18.22.1"
+  }
+}

@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from dataclasses import replace
 
-from test_perception import perception
+from tests._fixtures import perception
 from vtuber.runtime.perception_bus import PerceptionBus, PerceptionQueueFull
 
 

@@ -5,19 +5,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from test_perception import perception
+from tests._fixtures import batch, perception
 from vtuber.context import ContextCompiler
 from vtuber.contracts.deep import DeepResult
 from vtuber.contracts.events import Event, UserMessage
-from vtuber.contracts.perception import PerceptionBatch
 from vtuber.minds.fake import FakeDeep, FakeFast
 from vtuber.runtime.journal import EventConflict, Journal
 from vtuber.runtime.orchestrator import Runtime
 from vtuber.runtime.perception_bus import PerceptionBus
-
-
-def batch(*items):
-    return PerceptionBatch(items[0].conversation_key, items, 'quiet')
 
 
 class RecordingFast:

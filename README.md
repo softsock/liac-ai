@@ -63,6 +63,27 @@ selects the character. `--fast-delay` controls chunk delay, `--deep-timeout` bou
 a Deep call. Restart with the same database to inspect persisted history/state.
 The local inspector displays raw messages; keep its output and database private.
 
+## M6.1.5: VTuber Hub
+
+The Windows Electron Hub starts and inspects the opt-in Single Mind runtime.
+Its Conversation panel sends messages directly to Liac. Use Activity, Wake,
+Live State, and Context to see what the runtime accepted and used.
+
+From the repository root with Node.js 22.12+ and the Python environment above installed:
+
+```powershell
+npm.cmd --prefix hub ci
+.\Start-Hub.cmd
+```
+
+**Luna** is the default backend. Install and authorize the existing
+[Luna bridge](docs/M6_0_SINGLE_MIND.md#task-1-transport-decision), then click
+**Start**. Set the Python and Bun executable paths in Settings if they are
+outside the checkout's `.venv` or PATH. Select **Fake** in Settings for offline
+testing. By default, the Hub uses
+separate ignored databases `.data/hub-fake.sqlite3` and `.data/hub-luna.sqlite3`.
+Use one running runtime per database. See the [Hub implementation report](docs/M6_1_5_VTUBER_HUB.md).
+
 ## Real Nemotron through LM Studio
 
 Install the optional tokenizer and download its pinned 32 MB data file once:

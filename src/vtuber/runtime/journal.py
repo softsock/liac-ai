@@ -6,10 +6,12 @@ from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
 from datetime import datetime, timedelta
+from hashlib import sha256
 from typing import Callable, Iterator
 
-from vtuber.contracts.events import CharacterId, CharacterInitiative, Event, canonical_json, utc_now
+from vtuber.contracts.events import CharacterId, CharacterInitiative, Event, UserMessage, canonical_json, utc_now
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextEpoch, ContextItem
+from vtuber.contracts.perception import Perception, PerceptionBatch
 from vtuber.contracts.state import CharacterState, FastSnapshot, NoteProposal, UpdateResult
 from vtuber.runtime.state import RevisionConflict, reduce_note
 from vtuber.contracts.deep import (CompactionInput, DeepRequest, DeepResult,
@@ -104,6 +106,41 @@ class Journal:
         with self._transaction():
             return tuple(self._append(event) for event in events)
 
+    def accept_local_perceptions(self, character_id: str, batch: PerceptionBatch) -> UserMessage | None:
+        message, _ = self.ingest_local_perceptions(character_id, batch)
+        return message
+
+    def ingest_local_perceptions(
+        self, character_id: str, batch: PerceptionBatch,
+    ) -> tuple[UserMessage | None, tuple[Perception, ...]]:
+        direct = tuple(item for item in batch.items if item.delivery == 'direct')
+        if any(item.kind != 'chat' or item.source != 'local' or item.conversation_key != 'local'
+               for item in direct) or len({item.author_id for item in direct}) > 1:
+            raise ValueError('M5.0 supports only single-author direct chat on the local route')
+        raw = tuple((item, Event.create(character_id, 'perception.received', asdict(item),
+            event_id=item.perception_id, source=item.source, occurred_at=item.occurred_at))
+            for item in batch.items if item.delivery != 'noise')
+        if not raw:
+            return None, ()
+        with self._transaction():
+            # A replay returns its original sequence, including earlier writes in this batch.
+            latest = self.high_watermark(character_id)
+            accepted = []
+            for item, event in raw:
+                sequence = self._append(event).sequence
+                if sequence > latest:
+                    accepted.append(item)
+                    latest = sequence
+            new_direct = [item for item in accepted if item.delivery == 'direct']
+            if not new_direct:
+                return None, tuple(accepted)
+            digest = sha256(canonical_json([item.perception_id for item in new_direct]).encode('utf-8')).hexdigest()
+            message = UserMessage('\n'.join(item.content for item in new_direct),
+                character_id, event_id='perception_group_' + digest, turn_id='perception_turn_' + digest,
+                occurred_at=new_direct[0].occurred_at)
+            self._append(message.as_event())
+            return message, tuple(accepted)
+
     def read(self, character_id: CharacterId, *, after: int = 0,
              limit: int = 100) -> tuple[Event, ...]:
         if after < 0 or limit < 1:
@@ -112,11 +149,33 @@ class Journal:
             ORDER BY sequence LIMIT ?""", (character_id, after, limit)).fetchall()
         return tuple(self._decode(row) for row in rows)
 
+    def recent_events(self, character_id: CharacterId, *, kinds: tuple[str, ...],
+                      limit: int) -> tuple[Event, ...]:
+        placeholders = ','.join('?' for _ in kinds)
+        rows = self._db.execute(f"""SELECT * FROM events WHERE character_id=? AND
+            json_extract(content, '$.kind') IN ({placeholders})
+            ORDER BY sequence DESC LIMIT ?""", (character_id, *kinds, limit)).fetchall()
+        return tuple(self._decode(row) for row in rows)
+
     def recent_dialogue(self, character_id: CharacterId, limit: int = 20) -> tuple[Event, ...]:
-        rows = self._db.execute("""SELECT * FROM events WHERE character_id=? AND
-            json_extract(content, '$.kind') IN ('user.message.completed', 'character.reply.completed')
-            ORDER BY sequence DESC LIMIT ?""", (character_id, limit)).fetchall()
-        return tuple(self._decode(row) for row in reversed(rows))
+        recent = self.recent_events(character_id, kinds=('user.message.completed', 'character.reply.completed'),
+                                    limit=limit)
+        return recent[::-1]
+
+    def completed_dialogue(self, before: Event, *, limit: int) -> tuple[tuple[Event, Event], ...]:
+        rows = self._db.execute("""SELECT reply.*, input.content AS input_content,
+                input.sequence AS input_sequence, input.recorded_at AS input_recorded_at
+            FROM events AS reply CROSS JOIN events AS input
+            WHERE reply.character_id=? AND reply.sequence<?
+                AND json_extract(reply.content, '$.kind') = 'character.reply.completed'
+                AND input.character_id=reply.character_id AND input.sequence<reply.sequence
+                AND json_extract(input.content, '$.kind') = 'user.message.completed'
+                AND json_extract(input.content, '$.turn_id') = json_extract(reply.content, '$.turn_id')
+            ORDER BY reply.sequence DESC LIMIT ?""",
+            (before.character_id, before.sequence, limit)).fetchall()
+        return tuple((Event(**json.loads(row['input_content']), sequence=row['input_sequence'],
+                            recorded_at=row['input_recorded_at']), self._decode(row))
+                     for row in reversed(rows))
 
     def snapshot(self, character_id: CharacterId) -> CharacterState:
         row = self._db.execute("SELECT * FROM character_state WHERE character_id=?",

@@ -7,10 +7,9 @@ from time import perf_counter
 from pathlib import Path
 from dataclasses import asdict
 from datetime import datetime, timedelta
-from hashlib import sha256
 from typing import Literal
 
-from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage, FastInput, CharacterInitiative, canonical_json, utc_now
+from vtuber.contracts.events import Event, OutputKind, RuntimeOutput, UserMessage, FastInput, CharacterInitiative, utc_now
 from vtuber.contracts.perception import PerceptionBatch
 from vtuber.contracts.protocols import ContextPolicy, DeepMind, FastMind, OutputSink
 from vtuber.contracts.context import CompactionProposal, CompactionResult, ContextBudgetExceeded
@@ -107,26 +106,7 @@ class Runtime:
         async with self._input_lock:
             if not self._started or self._stopping:
                 raise RuntimeError('Runtime is not accepting perceptions')
-            direct = tuple(item for item in batch.items if item.delivery == 'direct')
-            if any(item.kind != 'chat' or item.source != 'local' or item.conversation_key != 'local'
-                   for item in direct) or len({item.author_id for item in direct}) > 1:
-                raise ValueError('M5.0 supports only single-author direct chat on the local route')
-            raw = tuple(Event.create(self.character_id, 'perception.received', asdict(item),
-                event_id=item.perception_id, source=item.source, occurred_at=item.occurred_at)
-                for item in batch.items if item.delivery != 'noise')
-            # Keep duplicates in raw for transactional conflict checking, but render new IDs once.
-            new_direct = {}
-            for item in direct:
-                if self.journal.get(item.perception_id) is None:
-                    new_direct.setdefault(item.perception_id, item)
-            message = None
-            if new_direct:
-                digest = sha256(canonical_json(list(new_direct)).encode('utf-8')).hexdigest()
-                message = UserMessage('\n'.join(item.content for item in new_direct.values()),
-                    self.character_id, event_id='perception_group_' + digest,
-                    turn_id='perception_turn_' + digest,
-                    occurred_at=next(iter(new_direct.values())).occurred_at)
-            self.journal.append_many((*raw, message.as_event()) if message else raw)
+            message = self.journal.accept_local_perceptions(self.character_id, batch)
             if message is None:
                 return None
             self._deep_worker.notify()
